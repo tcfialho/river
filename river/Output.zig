@@ -133,6 +133,10 @@ const RenderingState = struct {
     };
 };
 
+const tearing_failure_limit = 10;
+const tearing_retry_cooldown_frames = 120;
+const scanout_log_cooldown_frames = 120;
+
 /// Set to null when the wlr_output is destroyed.
 wlr_output: ?*wlr.Output,
 scene_output: ?*wlr.SceneOutput,
@@ -175,6 +179,14 @@ rendering_requested: RenderingState = .init,
 /// State applied to the wlr_output and rendered.
 current: State,
 rendering_current: RenderingState = .init,
+tearing_test_failures: u8 = 0,
+tearing_test_cooldown: u8 = 0,
+direct_scanout_logged: bool = false,
+direct_scanout_log_cooldown: u8 = 0,
+direct_scanout_log_suppressed: u16 = 0,
+zero_copy_logged: bool = false,
+zero_copy_log_cooldown: u8 = 0,
+zero_copy_log_suppressed: u16 = 0,
 
 destroy: wl.Listener(*wlr.Output) = .init(handleDestroy),
 request_state: wl.Listener(*wlr.Output.event.RequestState) = .init(handleRequestState),
@@ -461,25 +473,50 @@ fn renderAndCommit(output: *Output) !void {
     if (!output.scene_output.?.needsFrame()) return;
 
     const wlr_output = output.wlr_output.?;
+    const scene_output = output.scene_output.?;
 
     var state = wlr.Output.State.init();
     defer state.finish();
 
     output.current.applyNoModeset(&state);
 
-    if (!output.scene_output.?.buildState(&state, null)) return error.CommitFailed;
+    if (!scene_output.buildState(&state, null)) return error.CommitFailed;
 
     if (output.rendering_current.tearing) {
-        state.tearing_page_flip = true;
-        // TODO don't try this every frame if it consistently fails. Stop trying if it fails
-        // for 10 frames in a row or something.
-        if (!wlr_output.testState(&state)) {
-            log.info("tearing page flip test failed for {s}, retrying without tearing", .{wlr_output.name});
-            state.tearing_page_flip = false;
+        if (output.tearing_test_cooldown > 0) {
+            output.tearing_test_cooldown -= 1;
+        } else {
+            state.tearing_page_flip = true;
+            if (!wlr_output.testState(&state)) {
+                state.tearing_page_flip = false;
+                output.tearing_test_failures +|= 1;
+                if (output.tearing_test_failures >= tearing_failure_limit) {
+                    output.tearing_test_failures = 0;
+                    output.tearing_test_cooldown = tearing_retry_cooldown_frames;
+                    log.info("tearing page flip test failed repeatedly for {s}, cooling down retries", .{wlr_output.name});
+                } else {
+                    log.info("tearing page flip test failed for {s}, retrying without tearing", .{wlr_output.name});
+                }
+            } else {
+                output.tearing_test_failures = 0;
+            }
         }
+    } else {
+        output.tearing_test_failures = 0;
+        output.tearing_test_cooldown = 0;
     }
 
+    const direct_scanout = scene_output.private.prev_scanout;
+    const direct_scanout_allowed = wlr_output.isDirectScanoutAllowed();
+    const committed_buffer = state.committed.buffer and state.buffer != null;
     if (!wlr_output.commitState(&state)) return error.CommitFailed;
+    output.logDirectScanoutTransition(
+        wlr_output,
+        direct_scanout,
+        direct_scanout_allowed,
+        committed_buffer,
+        state.tearing_page_flip,
+    );
 
     switch (server.lock_manager.state) {
         .unlocked => {
@@ -529,6 +566,7 @@ fn handlePresent(
     if (!event.presented) {
         return;
     }
+    output.logZeroCopyTransition(event.output, event.flags.zero_copy);
     switch (output.lock_render_state) {
         .pending_unlock => {
             assert(server.lock_manager.state != .locked);
@@ -549,4 +587,64 @@ fn handlePresent(
         },
         .blanked, .lock_surface => {},
     }
+}
+
+fn logDirectScanoutTransition(
+    output: *Output,
+    wlr_output: *wlr.Output,
+    active: bool,
+    allowed: bool,
+    committed_buffer: bool,
+    tearing: bool,
+) void {
+    if (output.direct_scanout_log_cooldown > 0) {
+        output.direct_scanout_log_cooldown -= 1;
+    }
+
+    if (output.direct_scanout_logged == active) return;
+
+    if (output.direct_scanout_log_cooldown > 0) {
+        output.direct_scanout_log_suppressed +|= 1;
+        return;
+    }
+
+    const suppressed = output.direct_scanout_log_suppressed;
+    output.direct_scanout_logged = active;
+    output.direct_scanout_log_suppressed = 0;
+    output.direct_scanout_log_cooldown = scanout_log_cooldown_frames;
+
+    if (active) {
+        log.info(
+            "direct scanout active on {s}: buffer={} tearing={} capture_sessions={} suppressed_changes={}",
+            .{ wlr_output.name, committed_buffer, tearing, output.current.capture_session_count, suppressed },
+        );
+    } else {
+        log.info(
+            "direct scanout inactive on {s}: allowed={} buffer={} capture_sessions={} suppressed_changes={}",
+            .{ wlr_output.name, allowed, committed_buffer, output.current.capture_session_count, suppressed },
+        );
+    }
+}
+
+fn logZeroCopyTransition(output: *Output, wlr_output: *wlr.Output, zero_copy: bool) void {
+    if (output.zero_copy_log_cooldown > 0) {
+        output.zero_copy_log_cooldown -= 1;
+    }
+
+    if (output.zero_copy_logged == zero_copy) return;
+
+    if (output.zero_copy_log_cooldown > 0) {
+        output.zero_copy_log_suppressed +|= 1;
+        return;
+    }
+
+    const suppressed = output.zero_copy_log_suppressed;
+    output.zero_copy_logged = zero_copy;
+    output.zero_copy_log_suppressed = 0;
+    output.zero_copy_log_cooldown = scanout_log_cooldown_frames;
+
+    log.debug(
+        "present zero-copy changed on {s}: zero_copy={} suppressed_changes={}",
+        .{ wlr_output.name, zero_copy, suppressed },
+    );
 }
