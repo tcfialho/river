@@ -489,7 +489,7 @@ fn renderFinish(wm: *WindowManager) void {
     //
     // TODO(wlroots) provide a way to batch changes to the scene graph.
     const new_order_hash = blk: {
-        var hash = std.crypto.hash.Blake3.init(.{});
+        var hash = std.hash.Wyhash.init(0);
         var it = wm.rendering_requested.list.iterator(.forward);
         while (it.next()) |node| {
             switch (node.get()) {
@@ -502,9 +502,7 @@ fn renderFinish(wm: *WindowManager) void {
                 },
             }
         }
-        var final: u64 = undefined;
-        hash.final(@ptrCast(&final));
-        break :blk final;
+        break :blk hash.final();
     };
 
     {
