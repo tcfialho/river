@@ -586,6 +586,11 @@ const CaptureSession = struct {
             while (it.next()) |window| {
                 if (session.wlr_capture_session.source == window.capture_source) {
                     window.wm_scheduled.capture_session_count -= 1;
+                    if (window.wm_scheduled.capture_session_count == 0) {
+                        if (window.impl == .toplevel) {
+                            window.impl.toplevel.last_clip_geometry = null;
+                        }
+                    }
                     break;
                 }
             } else unreachable;
@@ -625,6 +630,11 @@ fn handleNewCaptureSession(
         while (it.next()) |window| {
             if (wlr_capture_session.source == window.capture_source) {
                 window.wm_scheduled.capture_session_count += 1;
+                if (window.impl == .toplevel) {
+                    const toplevel = &window.impl.toplevel;
+                    window.capture_scene.tree.node.subsurfaceTreeSetClip(&toplevel.wlr_toplevel.base.geometry);
+                    toplevel.last_clip_geometry = toplevel.wlr_toplevel.base.geometry;
+                }
                 break;
             }
         } else unreachable;
