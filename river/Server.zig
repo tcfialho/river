@@ -124,7 +124,7 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
 
     var session: ?*wlr.Session = undefined;
     const backend = try wlr.Backend.autocreate(loop, &session);
-    const renderer = try wlr.Renderer.autocreate(backend);
+    const renderer = try createRenderer(backend);
 
     const compositor = try wlr.Compositor.create(wl_server, 6, renderer);
 
@@ -244,6 +244,34 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
 
     wl_server.setGlobalFilter(*Server, globalFilter, server);
 }
+
+/// Prefer the Vulkan renderer over the wlroots default (GLES2) unless the user
+/// explicitly chose a renderer through the WLR_RENDERER environment variable.
+/// The NVIDIA driver busy-waits on the CPU for every EGL context switch and the
+/// GLES2 renderer switches contexts multiple times per frame and per client
+/// buffer import, which was measured to waste roughly 10x the CPU the Vulkan
+/// renderer needs for an identical workload.
+fn createRenderer(backend: *wlr.Backend) !*wlr.Renderer {
+    if (getenv("WLR_RENDERER") != null) {
+        return wlr.Renderer.autocreate(backend);
+    }
+
+    _ = setenv("WLR_RENDERER", "vulkan", 1);
+    const vulkan = wlr.Renderer.autocreate(backend);
+    _ = unsetenv("WLR_RENDERER");
+
+    if (vulkan) |renderer| {
+        log.info("created vulkan renderer", .{});
+        return renderer;
+    } else |_| {
+        log.warn("failed to create vulkan renderer, falling back to wlroots default", .{});
+        return wlr.Renderer.autocreate(backend);
+    }
+}
+
+extern fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern fn unsetenv(name: [*:0]const u8) c_int;
 
 /// Free allocated memory and clean up. Note: order is important here
 pub fn deinit(server: *Server) void {
@@ -438,7 +466,7 @@ fn gpuResetRecoverIdle(server: *Server) void {
 
 fn gpuResetRecover(server: *Server) !void {
     log.info("recovering from GPU reset", .{});
-    const new_renderer = try wlr.Renderer.autocreate(server.backend);
+    const new_renderer = try createRenderer(server.backend);
     errdefer new_renderer.destroy();
 
     const new_allocator = try wlr.Allocator.autocreate(server.backend, new_renderer);
