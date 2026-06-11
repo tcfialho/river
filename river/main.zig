@@ -307,6 +307,17 @@ pub const std_options: std.Options = .{
     .logFn = logFn,
 };
 
+const LastLog = struct {
+    format_ptr: usize = 0,
+    format_len: usize = 0,
+    scope_ptr: usize = 0,
+    scope_len: usize = 0,
+    level: log.Level = .info,
+    count: usize = 0,
+    last_ms: u32 = 0,
+};
+var last_log: LastLog = .{};
+
 pub fn logFn(
     comptime level: log.Level,
     comptime scope: @TypeOf(.EnumLiteral),
@@ -317,7 +328,35 @@ pub fn logFn(
 
     if (scope != .default and !log_scopes.contains(scope)) return;
 
-    log.defaultLog(level, scope, format, args);
+    const now = util.msecTimestamp();
+    const scope_name = @tagName(scope);
+    const same = (last_log.format_ptr != 0 and
+        @intFromPtr(format.ptr) == last_log.format_ptr and
+        format.len == last_log.format_len and
+        @intFromPtr(scope_name.ptr) == last_log.scope_ptr and
+        scope_name.len == last_log.scope_len and
+        level == last_log.level);
+
+    if (same) {
+        last_log.count += 1;
+        if (now -% last_log.last_ms >= 5000) {
+            log.defaultLog(level, scope, "last message repeated {d} times", .{last_log.count});
+            last_log.count = 0;
+            last_log.last_ms = now;
+        }
+    } else {
+        if (last_log.count > 0) {
+            log.defaultLog(level, scope, "last message repeated {d} times", .{last_log.count});
+        }
+        log.defaultLog(level, scope, format, args);
+        last_log.level = level;
+        last_log.format_ptr = @intFromPtr(format.ptr);
+        last_log.format_len = format.len;
+        last_log.scope_ptr = @intFromPtr(scope_name.ptr);
+        last_log.scope_len = scope_name.len;
+        last_log.count = 0;
+        last_log.last_ms = now;
+    }
 }
 
 /// See wlroots_log_wrapper.c
