@@ -460,8 +460,14 @@ fn handleRequestResize(listener: *wl.Listener(*wlr.XdgToplevel.event.Resize), ev
     }
 }
 
-fn handleSetParent(_: *wl.Listener(void)) void {
-    server.wm.dirtyWindowing();
+fn handleSetParent(listener: *wl.Listener(void)) void {
+    const toplevel: *XdgToplevel = @fieldParentPtr("set_parent", listener);
+    const window = toplevel.window;
+    const current_parent = window.getParent();
+    const sent_parent = if (window.wm_sent.parent) |p| p.get() else null;
+    if (current_parent != sent_parent) {
+        server.wm.dirtyWindowingLazy();
+    }
 }
 
 /// Called when the client sets / updates its title

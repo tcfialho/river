@@ -1201,7 +1201,7 @@ pub fn unmap(window: *Window) void {
 
 pub fn notifyTitle(window: *Window) void {
     window.wm_scheduled.dirty_title = true;
-    server.wm.dirtyWindowing();
+    server.wm.dirtyWindowingLazy();
 
     if (window.foreign_toplevel_handle) |handle| {
         handle.updateState(&.{
@@ -1216,7 +1216,7 @@ pub fn notifyTitle(window: *Window) void {
 
 pub fn notifyAppId(window: *Window) void {
     window.wm_scheduled.dirty_app_id = true;
-    server.wm.dirtyWindowing();
+    server.wm.dirtyWindowingLazy();
 
     if (window.foreign_toplevel_handle) |handle| {
         handle.updateState(&.{
