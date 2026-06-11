@@ -1,0 +1,195 @@
+--- wlroots-pristine/types/output/cursor.c	2026-05-19 17:56:13.000000000 -0300
++++ wlroots-0.20.1/types/output/cursor.c	2026-06-11 10:31:20.979962142 -0300
+@@ -1,16 +1,21 @@
+ #include <assert.h>
+ #include <drm_fourcc.h>
+ #include <stdlib.h>
++#include <string.h>
++#include <wlr/backend.h>
+ #include <wlr/interfaces/wlr_output.h>
+ #include <wlr/render/allocator.h>
+ #include <wlr/render/swapchain.h>
+ #include <wlr/render/drm_syncobj.h>
+ #include <wlr/render/wlr_renderer.h>
++#include <wlr/render/wlr_texture.h>
+ #include <wlr/types/wlr_compositor.h>
+ #include <wlr/util/log.h>
+ #include <wlr/util/region.h>
+ #include <wlr/util/transform.h>
++#include "render/allocator/drm_dumb.h"
+ #include "render/color.h"
++#include "render/drm_format_set.h"
+ #include "types/wlr_buffer.h"
+ #include "types/wlr_output.h"
+ 
+@@ -182,6 +187,128 @@
+ 	return output_pick_format(output, display_formats, format, DRM_FORMAT_ARGB8888);
+ }
+ 
++// Some drivers (NVIDIA proprietary) cannot render to, copy into, or even
++// import linear images with their Vulkan implementation, while their KMS
++// cursor planes only accept linear ARGB8888 buffers. When the renderer cannot
++// produce a cursor-plane-compatible buffer, compose the cursor sprite on the
++// CPU into a linear DRM dumb buffer instead of permanently falling back to a
++// software cursor. The sprite is tiny and only re-composed when its image
++// changes, while a software cursor costs a full output recomposition on every
++// pointer motion and disables direct scan-out.
++static struct wlr_allocator *cpu_cursor_allocator = NULL;
++
++static struct wlr_allocator *get_cpu_cursor_allocator(struct wlr_output *output) {
++	static int alloc_drm_fd = -1;
++
++	int drm_fd = wlr_backend_get_drm_fd(output->backend);
++	if (drm_fd < 0) {
++		return NULL;
++	}
++	if (cpu_cursor_allocator != NULL) {
++		return alloc_drm_fd == drm_fd ? cpu_cursor_allocator : NULL;
++	}
++	cpu_cursor_allocator = wlr_drm_dumb_allocator_create(drm_fd);
++	alloc_drm_fd = drm_fd;
++	return cpu_cursor_allocator;
++}
++
++static bool output_pick_cursor_format_cpu(struct wlr_output *output,
++		struct wlr_drm_format *format) {
++	if (output->impl->get_cursor_formats == NULL) {
++		return false;
++	}
++	const struct wlr_drm_format_set *display_formats =
++		output->impl->get_cursor_formats(output,
++			WLR_BUFFER_CAP_DATA_PTR | WLR_BUFFER_CAP_DMABUF);
++	if (display_formats == NULL) {
++		return false;
++	}
++	const struct wlr_drm_format *fmt =
++		wlr_drm_format_set_get(display_formats, DRM_FORMAT_ARGB8888);
++	if (fmt == NULL) {
++		return false;
++	}
++	if (!wlr_drm_format_has(fmt, DRM_FORMAT_MOD_LINEAR) &&
++			!wlr_drm_format_has(fmt, DRM_FORMAT_MOD_INVALID)) {
++		return false;
++	}
++	return wlr_drm_format_copy(format, fmt);
++}
++
++static bool render_cursor_buffer_cpu(struct wlr_output_cursor *cursor,
++		struct wlr_texture *texture, struct wlr_buffer *buffer,
++		const struct wlr_box *dst_box) {
++	struct wlr_output *output = cursor->output;
++
++	// Keep the CPU path simple: bail out to the software cursor for rotated
++	// outputs or color-managed cursors, which are both rare.
++	if (output->transform != WL_OUTPUT_TRANSFORM_NORMAL ||
++			cursor->transform != WL_OUTPUT_TRANSFORM_NORMAL ||
++			cursor->color_transform != NULL) {
++		return false;
++	}
++	if (dst_box->width <= 0 || dst_box->height <= 0) {
++		return false;
++	}
++
++	void *data;
++	uint32_t drm_format;
++	size_t stride;
++	if (!wlr_buffer_begin_data_ptr_access(buffer,
++			WLR_BUFFER_DATA_PTR_ACCESS_WRITE, &data, &drm_format, &stride)) {
++		return false;
++	}
++	if (drm_format != DRM_FORMAT_ARGB8888) {
++		wlr_buffer_end_data_ptr_access(buffer);
++		return false;
++	}
++
++	int src_width = texture->width;
++	int src_height = texture->height;
++	uint32_t *src = malloc((size_t)src_width * src_height * 4);
++	if (src == NULL) {
++		wlr_buffer_end_data_ptr_access(buffer);
++		return false;
++	}
++	if (!wlr_texture_read_pixels(texture,
++			&(struct wlr_texture_read_pixels_options){
++				.data = src,
++				.format = DRM_FORMAT_ARGB8888,
++				.stride = (uint32_t)src_width * 4,
++			})) {
++		free(src);
++		wlr_buffer_end_data_ptr_access(buffer);
++		return false;
++	}
++
++	struct wlr_fbox src_box = cursor->src_box;
++	if (src_box.width <= 0 || src_box.height <= 0) {
++		src_box = (struct wlr_fbox){
++			.width = src_width,
++			.height = src_height,
++		};
++	}
++
++	for (int y = 0; y < buffer->height; y++) {
++		uint32_t *row = (uint32_t *)((char *)data + (size_t)y * stride);
++		for (int x = 0; x < buffer->width; x++) {
++			uint32_t pixel = 0;
++			if (x < dst_box->width && y < dst_box->height) {
++				int sx = (int)(src_box.x + x * src_box.width / dst_box->width);
++				int sy = (int)(src_box.y + y * src_box.height / dst_box->height);
++				if (sx >= 0 && sx < src_width && sy >= 0 && sy < src_height) {
++					pixel = src[(size_t)sy * src_width + sx];
++				}
++			}
++			row[x] = pixel;
++		}
++	}
++
++	free(src);
++	wlr_buffer_end_data_ptr_access(buffer);
++	return true;
++}
++
+ static struct wlr_buffer *render_cursor_buffer(struct wlr_output_cursor *cursor) {
+ 	struct wlr_output *output = cursor->output;
+ 
+@@ -228,14 +355,22 @@
+ 	if (output->cursor_swapchain == NULL ||
+ 			output->cursor_swapchain->width != width ||
+ 			output->cursor_swapchain->height != height) {
++		struct wlr_allocator *cursor_allocator = allocator;
+ 		struct wlr_drm_format format = {0};
+ 		if (!output_pick_cursor_format(output, &format)) {
+-			wlr_log(WLR_DEBUG, "Failed to pick cursor format");
+-			return NULL;
++			struct wlr_allocator *cpu_alloc = get_cpu_cursor_allocator(output);
++			if (cpu_alloc == NULL ||
++					!output_pick_cursor_format_cpu(output, &format)) {
++				wlr_log(WLR_DEBUG, "Failed to pick cursor format");
++				return NULL;
++			}
++			wlr_log(WLR_INFO, "Renderer cannot render into cursor plane "
++				"buffers, composing cursor sprites on the CPU");
++			cursor_allocator = cpu_alloc;
+ 		}
+ 
+ 		wlr_swapchain_destroy(output->cursor_swapchain);
+-		output->cursor_swapchain = wlr_swapchain_create(allocator,
++		output->cursor_swapchain = wlr_swapchain_create(cursor_allocator,
+ 			width, height, &format);
+ 		wlr_drm_format_finish(&format);
+ 		if (output->cursor_swapchain == NULL) {
+@@ -256,6 +391,15 @@
+ 	wlr_box_transform(&dst_box, &dst_box, wlr_output_transform_invert(output->transform),
+ 		buffer->width, buffer->height);
+ 
++	if (cpu_cursor_allocator != NULL &&
++			output->cursor_swapchain->allocator == cpu_cursor_allocator) {
++		if (!render_cursor_buffer_cpu(cursor, texture, buffer, &dst_box)) {
++			wlr_buffer_unlock(buffer);
++			return NULL;
++		}
++		return buffer;
++	}
++
+ 	struct wlr_buffer_pass_options options = {
+ 		.color_transform = cursor->color_transform,
+ 	};
