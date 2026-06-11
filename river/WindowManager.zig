@@ -77,11 +77,16 @@ rendering_requested: struct {
 dirty_idle: ?*wl.EventSource = null,
 
 timeout: *wl.EventSource,
+lazy_coalesce_timer: *wl.EventSource,
+lazy_timer_armed: bool = false,
 
 pub fn init(wm: *WindowManager) !void {
     const event_loop = server.wl_server.getEventLoop();
     const timeout = try event_loop.addTimer(*WindowManager, handleTimeout, wm);
     errdefer timeout.remove();
+
+    const lazy_timer = try event_loop.addTimer(*WindowManager, handleLazyCoalesce, wm);
+    errdefer lazy_timer.remove();
 
     wm.* = .{
         .global = try wl.Global.create(server.wl_server, river.WindowManagerV1, 5, *WindowManager, wm, bind),
@@ -93,6 +98,7 @@ pub fn init(wm: *WindowManager) !void {
             .list = undefined,
         },
         .timeout = timeout,
+        .lazy_coalesce_timer = lazy_timer,
     };
     wm.sent.outputs.init();
     wm.sent.seats.init();
@@ -106,6 +112,7 @@ fn handleServerDestroy(listener: *wl.Listener(*wl.Server), _: *wl.Server) void {
 
     wm.global.destroy();
     wm.timeout.remove();
+    wm.lazy_coalesce_timer.remove();
 }
 
 fn bind(client: *wl.Client, wm: *WindowManager, version: u32, id: u32) void {
@@ -239,12 +246,26 @@ pub fn ensureRendering(wm: *WindowManager) bool {
 
 pub fn dirtyWindowing(wm: *WindowManager) void {
     wm.scheduled.dirty = true;
+    wm.cancelLazyTimer();
     wm.addDirtyIdle();
 }
 
 pub fn dirtyWindowingLazy(wm: *WindowManager) void {
     wm.scheduled.dirty_lazy = true;
-    wm.addDirtyIdle();
+    if (wm.scheduled.dirty or wm.rendering_scheduled.dirty) {
+        wm.addDirtyIdle();
+    } else if (wm.anySeatInOpMode()) {
+        wm.addDirtyIdle();
+    } else {
+        if (!wm.lazy_timer_armed) {
+            wm.lazy_coalesce_timer.timerUpdate(8) catch |err| {
+                log.err("failed to arm lazy coalesce timer: {}", .{err});
+                wm.addDirtyIdle();
+                return;
+            };
+            wm.lazy_timer_armed = true;
+        }
+    }
 }
 
 pub fn cleanWindowing(wm: *WindowManager) void {
@@ -254,6 +275,7 @@ pub fn cleanWindowing(wm: *WindowManager) void {
 
 pub fn dirtyRendering(wm: *WindowManager) void {
     wm.rendering_scheduled.dirty = true;
+    wm.cancelLazyTimer();
     wm.addDirtyIdle();
 }
 
@@ -394,6 +416,36 @@ fn startTimeoutTimer(wm: *WindowManager, ms: u31) void {
 
 fn cancelTimeoutTimer(wm: *WindowManager) void {
     wm.timeout.timerUpdate(0) catch log.err("error disarming timer", .{});
+}
+
+fn cancelLazyTimer(wm: *WindowManager) void {
+    if (wm.lazy_timer_armed) {
+        wm.lazy_coalesce_timer.timerUpdate(0) catch log.err("error disarming lazy timer", .{});
+        wm.lazy_timer_armed = false;
+    }
+}
+
+fn anySeatInOpMode(wm: *WindowManager) bool {
+    _ = wm;
+    var it = server.input_manager.seats.iterator(.forward);
+    while (it.next()) |seat| {
+        if (seat.cursor.mode == .op) return true;
+    }
+    return false;
+}
+
+fn handleLazyCoalesce(wm: *WindowManager) c_int {
+    wm.lazy_timer_armed = false;
+    if (wm.scheduled.dirty_lazy and !wm.scheduled.dirty and !wm.rendering_scheduled.dirty) {
+        if (wm.state == .idle) {
+            wm.scheduled.dirty = true;
+            wm.scheduled.dirty_lazy = false;
+            wm.manageStart();
+        } else {
+            wm.addDirtyIdle();
+        }
+    }
+    return 0;
 }
 
 fn handleTimeout(wm: *WindowManager) c_int {
