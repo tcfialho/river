@@ -187,6 +187,9 @@ direct_scanout_log_suppressed: u16 = 0,
 zero_copy_logged: bool = false,
 zero_copy_log_cooldown: u8 = 0,
 zero_copy_log_suppressed: u16 = 0,
+tearing_test_succeeded: bool = false,
+last_direct_scanout: bool = false,
+tearing_test_frame_counter: u8 = 0,
 
 destroy: wl.Listener(*wlr.Output) = .init(handleDestroy),
 request_state: wl.Listener(*wlr.Output.event.RequestState) = .init(handleRequestState),
@@ -483,11 +486,22 @@ fn renderAndCommit(output: *Output) !void {
     if (!scene_output.buildState(&state, null)) return error.CommitFailed;
 
     if (output.rendering_current.tearing) {
+        const cur_scanout = scene_output.private.prev_scanout;
+        if (cur_scanout != output.last_direct_scanout) {
+            output.tearing_test_succeeded = false;
+            output.last_direct_scanout = cur_scanout;
+        }
+
         if (output.tearing_test_cooldown > 0) {
             output.tearing_test_cooldown -= 1;
         } else {
             state.tearing_page_flip = true;
-            if (!wlr_output.testState(&state)) {
+            if (output.tearing_test_succeeded) {
+                output.tearing_test_frame_counter +%= 1;
+                if (output.tearing_test_frame_counter >= 120) {
+                    output.tearing_test_succeeded = false;
+                }
+            } else if (!wlr_output.testState(&state)) {
                 state.tearing_page_flip = false;
                 output.tearing_test_failures +|= 1;
                 if (output.tearing_test_failures >= tearing_failure_limit) {
@@ -499,17 +513,24 @@ fn renderAndCommit(output: *Output) !void {
                 }
             } else {
                 output.tearing_test_failures = 0;
+                output.tearing_test_succeeded = true;
+                output.tearing_test_frame_counter = 0;
             }
         }
     } else {
         output.tearing_test_failures = 0;
         output.tearing_test_cooldown = 0;
+        output.tearing_test_succeeded = false;
+        output.tearing_test_frame_counter = 0;
     }
 
     const direct_scanout = scene_output.private.prev_scanout;
     const direct_scanout_allowed = wlr_output.isDirectScanoutAllowed();
     const committed_buffer = state.committed.buffer and state.buffer != null;
-    if (!wlr_output.commitState(&state)) return error.CommitFailed;
+    if (!wlr_output.commitState(&state)) {
+        output.tearing_test_succeeded = false;
+        return error.CommitFailed;
+    }
     output.logDirectScanoutTransition(
         wlr_output,
         direct_scanout,

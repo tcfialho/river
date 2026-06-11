@@ -379,6 +379,12 @@ pub fn commitOutputState(om: *OutputManager) void {
         }
         om.first_modeset = false;
 
+        for (states.items) |*state| {
+            const output: *Output = @ptrCast(@alignCast(state.output.data));
+            output.tearing_test_succeeded = false;
+            output.last_direct_scanout = false;
+        }
+
         swapchain_manager.apply();
     }
 
