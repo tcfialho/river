@@ -96,6 +96,11 @@ pressed: std.AutoHashMapUnmanaged(u32, ?*PointerBinding) = .{},
 /// This constraint is not necessarily active, activation only occurs once the cursor
 /// has been moved inside the constraint region.
 constraint: ?*PointerConstraint = null,
+last_notified: ?struct {
+    surface: *wlr.Surface,
+    sx: f64,
+    sy: f64,
+} = null,
 
 /// Keeps track of the last known location of all touch points in layout coordinates.
 /// This information is necessary for proper touch dnd support if there are multiple touch points.
@@ -332,6 +337,7 @@ fn handleRequestSetCursor(
 fn clearFocus(cursor: *Cursor) void {
     cursor.setImage(cursor.wm_image);
     cursor.seat.wlr_seat.pointerNotifyClearFocus();
+    cursor.last_notified = null;
 }
 
 pub fn opStartPointer(cursor: *Cursor) void {
@@ -384,8 +390,12 @@ pub fn processMotionRelative(cursor: *Cursor, event: *const Seat.Event.PointerMo
         .passthrough, .drag, .ignore, .down => {
             switch (cursor.mode) {
                 .passthrough, .drag => {
-                    cursor.updateHovered();
-                    cursor.passthrough(event.time_msec);
+                    const result = server.scene.at(cursor.wlr_cursor.x, cursor.wlr_cursor.y);
+                    cursor.updateHoveredAt(result);
+                    cursor.passthroughAt(result, event.time_msec);
+                    if (cursor.constraint) |constraint| {
+                        constraint.maybeActivateAt(result);
+                    }
                 },
                 .ignore => {},
                 .down => |data| {
@@ -401,7 +411,10 @@ pub fn processMotionRelative(cursor: *Cursor, event: *const Seat.Event.PointerMo
             cursor.updateDragIcons();
 
             if (cursor.constraint) |constraint| {
-                constraint.maybeActivate();
+                switch (cursor.mode) {
+                    .passthrough, .drag => {},
+                    else => constraint.maybeActivate(),
+                }
             }
         },
         .op => {
@@ -419,9 +432,13 @@ fn move(cursor: *const Cursor, mapping: *const wlr.Box, dx: f64, dy: f64) void {
     cursor.wlr_cursor.warpClosest(null, lx, ly);
 }
 
-fn updateHovered(cursor: *Cursor) void {
+pub fn updateHovered(cursor: *Cursor) void {
+    cursor.updateHoveredAt(server.scene.at(cursor.wlr_cursor.x, cursor.wlr_cursor.y));
+}
+
+fn updateHoveredAt(cursor: *Cursor, maybe_result: ?Scene.AtResult) void {
     const old = cursor.seat.wm_scheduled.hovered;
-    if (server.scene.at(cursor.wlr_cursor.x, cursor.wlr_cursor.y)) |result| {
+    if (maybe_result) |result| {
         switch (result.data) {
             .window => |window| {
                 switch (window.impl) {
@@ -454,6 +471,7 @@ fn updateHovered(cursor: *Cursor) void {
 
     if (cursor.seat.wm_scheduled.hovered != old) {
         server.wm.dirtyWindowing();
+        cursor.last_notified = null;
     }
 }
 
@@ -785,10 +803,14 @@ pub fn updateState(cursor: *Cursor) void {
 }
 
 /// Pass an event on to the surface under the cursor, if any.
-fn passthrough(cursor: *Cursor, time: u32) void {
+pub fn passthrough(cursor: *Cursor, time: u32) void {
+    cursor.passthroughAt(server.scene.at(cursor.wlr_cursor.x, cursor.wlr_cursor.y), time);
+}
+
+fn passthroughAt(cursor: *Cursor, maybe_result: ?Scene.AtResult, time: u32) void {
     assert(cursor.mode == .passthrough or cursor.mode == .drag);
 
-    if (server.scene.at(cursor.wlr_cursor.x, cursor.wlr_cursor.y)) |result| {
+    if (maybe_result) |result| {
         if (result.data == .lock_surface) {
             assert(server.lock_manager.state != .unlocked);
         } else {
@@ -797,7 +819,18 @@ fn passthrough(cursor: *Cursor, time: u32) void {
 
         if (result.surface) |surface| {
             cursor.seat.wlr_seat.pointerNotifyEnter(surface, result.sx, result.sy);
-            cursor.seat.wlr_seat.pointerNotifyMotion(time, result.sx, result.sy);
+            if (cursor.last_notified == null or
+                cursor.last_notified.?.surface != surface or
+                cursor.last_notified.?.sx != result.sx or
+                cursor.last_notified.?.sy != result.sy)
+            {
+                cursor.seat.wlr_seat.pointerNotifyMotion(time, result.sx, result.sy);
+                cursor.last_notified = .{
+                    .surface = surface,
+                    .sx = result.sx,
+                    .sy = result.sy,
+                };
+            }
             return;
         }
     }

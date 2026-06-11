@@ -12,6 +12,7 @@ const server = &@import("main.zig").server;
 const util = @import("util.zig");
 
 const Seat = @import("Seat.zig");
+const Scene = @import("Scene.zig");
 
 const log = std.log.scoped(.input);
 
@@ -58,6 +59,11 @@ pub fn create(wlr_constraint: *wlr.PointerConstraintV1) error{OutOfMemory}!void 
 
 pub fn maybeActivate(constraint: *PointerConstraint) void {
     const seat: *Seat = @ptrCast(@alignCast(constraint.wlr_constraint.seat.data));
+    constraint.maybeActivateAt(server.scene.at(seat.cursor.wlr_cursor.x, seat.cursor.wlr_cursor.y));
+}
+
+pub fn maybeActivateAt(constraint: *PointerConstraint, maybe_result: ?Scene.AtResult) void {
+    const seat: *Seat = @ptrCast(@alignCast(constraint.wlr_constraint.seat.data));
 
     assert(seat.cursor.constraint == constraint);
 
@@ -65,7 +71,7 @@ pub fn maybeActivate(constraint: *PointerConstraint) void {
 
     if (seat.cursor.mode == .op) return;
 
-    const result = server.scene.at(seat.cursor.wlr_cursor.x, seat.cursor.wlr_cursor.y) orelse return;
+    const result = maybe_result orelse return;
     if (result.surface != constraint.wlr_constraint.surface) return;
 
     const sx: i32 = @intFromFloat(result.sx);
