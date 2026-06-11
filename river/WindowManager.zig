@@ -541,20 +541,21 @@ fn renderFinish(wm: *WindowManager) void {
     //
     // TODO(wlroots) provide a way to batch changes to the scene graph.
     const new_order_hash = blk: {
-        var hash = std.hash.Wyhash.init(0);
+        var hash_val: u64 = 14695981039346656037;
+        const prime: u64 = 1099511628211;
         var it = wm.rendering_requested.list.iterator(.forward);
         while (it.next()) |node| {
             switch (node.get()) {
                 .window => |window| {
-                    hash.update(@ptrCast(&window.ref));
-                    hash.update(&.{@intFromBool(renderedFullscreen(window))});
+                    hash_val = (hash_val ^ @as(u64, @bitCast(window.ref))) *% prime;
+                    hash_val = (hash_val ^ @as(u64, @intFromBool(renderedFullscreen(window)))) *% prime;
                 },
                 .shell_surface => |shell_surface| {
-                    hash.update(@ptrCast(&shell_surface));
+                    hash_val = (hash_val ^ @intFromPtr(shell_surface)) *% prime;
                 },
             }
         }
-        break :blk hash.final();
+        break :blk hash_val;
     };
 
     {
