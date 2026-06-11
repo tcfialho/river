@@ -415,7 +415,10 @@ pub fn commitOutputState(om: *OutputManager) void {
                         or output.sent.transform != output.current.transform
                         or pos_changed;
                     
-                    if (need_modeset or newly_enabled or config_changed or om.first_modeset) {
+                    const lock_pending = output.lock_render_state != .unlocked and
+                        output.lock_render_state != .blanked and
+                        output.lock_render_state != .lock_surface;
+                    if (need_modeset or newly_enabled or config_changed or om.first_modeset or lock_pending) {
                         wlr_output.scheduleFrame();
                     }
                 },
