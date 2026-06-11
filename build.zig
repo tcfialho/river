@@ -185,6 +185,12 @@ pub fn build(b: *Build) !void {
         river.root_module.linkSystemLibrary("xkbcommon", .{});
         river.root_module.linkSystemLibrary("pixman-1", .{});
 
+        // Prefer libraries installed next to the binary (e.g. the locally
+        // patched wlroots in ~/.local/lib when river lives in ~/.local/bin)
+        // over the system ones, without leaking environment variables to
+        // child processes the way LD_LIBRARY_PATH would.
+        river.root_module.addRPathSpecial("$ORIGIN/../lib");
+
         river.root_module.addImport("wayland", wayland);
         river.root_module.addImport("xkbcommon", xkbcommon);
         river.root_module.addImport("pixman", pixman);

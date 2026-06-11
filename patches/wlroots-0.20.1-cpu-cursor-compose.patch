@@ -1,5 +1,45 @@
---- wlroots-pristine/types/output/cursor.c	2026-05-19 17:56:13.000000000 -0300
-+++ wlroots-0.20.1/types/output/cursor.c	2026-06-11 10:31:20.979962142 -0300
+--- wlroots-0.20.1-pristine/render/drm_format_set.c
++++ wlroots-0.20.1/render/drm_format_set.c
+@@ -14,6 +14,11 @@
+ 	}
+ 
+ 	free(format->modifiers);
++	// Reset the struct: leaving a dangling modifiers pointer behind turns any
++	// later wlr_drm_format_copy() into the same format into a use-after-free
++	// (its internal malloc may reuse the freed chunk, which the copy then
++	// frees again, letting the heap allocator clobber the modifier values).
++	*format = (struct wlr_drm_format){0};
+ }
+ 
+ void wlr_drm_format_set_finish(struct wlr_drm_format_set *set) {
+@@ -143,17 +148,20 @@
+ bool wlr_drm_format_copy(struct wlr_drm_format *dst, const struct wlr_drm_format *src) {
+ 	assert(src->len <= src->capacity);
+ 
+-	uint64_t *modifiers = malloc(sizeof(*modifiers) * src->len);
++	size_t len = src->len;
++	uint32_t drm_format = src->format;
++
++	uint64_t *modifiers = malloc(sizeof(*modifiers) * len);
+ 	if (!modifiers) {
+ 		return false;
+ 	}
+ 
+-	memcpy(modifiers, src->modifiers, sizeof(*modifiers) * src->len);
++	memcpy(modifiers, src->modifiers, sizeof(*modifiers) * len);
+ 
+ 	wlr_drm_format_finish(dst);
+-	dst->capacity = src->len;
+-	dst->len = src->len;
+-	dst->format = src->format;
++	dst->capacity = len;
++	dst->len = len;
++	dst->format = drm_format;
+ 	dst->modifiers = modifiers;
+ 	return true;
+ }
+--- wlroots-0.20.1-pristine/types/output/cursor.c
++++ wlroots-0.20.1/types/output/cursor.c
 @@ -1,16 +1,21 @@
  #include <assert.h>
  #include <drm_fourcc.h>
@@ -22,7 +62,7 @@
  #include "types/wlr_buffer.h"
  #include "types/wlr_output.h"
  
-@@ -182,6 +187,128 @@
+@@ -182,6 +187,138 @@
  	return output_pick_format(output, display_formats, format, DRM_FORMAT_ARGB8888);
  }
  
@@ -38,7 +78,11 @@
 +
 +static struct wlr_allocator *get_cpu_cursor_allocator(struct wlr_output *output) {
 +	static int alloc_drm_fd = -1;
++	static bool create_failed = false;
 +
++	if (create_failed) {
++		return NULL;
++	}
 +	int drm_fd = wlr_backend_get_drm_fd(output->backend);
 +	if (drm_fd < 0) {
 +		return NULL;
@@ -47,6 +91,12 @@
 +		return alloc_drm_fd == drm_fd ? cpu_cursor_allocator : NULL;
 +	}
 +	cpu_cursor_allocator = wlr_drm_dumb_allocator_create(drm_fd);
++	if (cpu_cursor_allocator == NULL) {
++		// Dumb buffers need a primary node; remember the failure so every
++		// cursor update doesn't retry (and log an error) forever.
++		create_failed = true;
++		return NULL;
++	}
 +	alloc_drm_fd = drm_fd;
 +	return cpu_cursor_allocator;
 +}
@@ -151,7 +201,7 @@
  static struct wlr_buffer *render_cursor_buffer(struct wlr_output_cursor *cursor) {
  	struct wlr_output *output = cursor->output;
  
-@@ -228,14 +355,22 @@
+@@ -228,14 +365,26 @@
  	if (output->cursor_swapchain == NULL ||
  			output->cursor_swapchain->width != width ||
  			output->cursor_swapchain->height != height) {
@@ -160,6 +210,10 @@
  		if (!output_pick_cursor_format(output, &format)) {
 -			wlr_log(WLR_DEBUG, "Failed to pick cursor format");
 -			return NULL;
++			// A failed pick may leave previously-freed state behind in the
++			// format; reset it so the fallback pick below starts clean.
++			format = (struct wlr_drm_format){0};
++
 +			struct wlr_allocator *cpu_alloc = get_cpu_cursor_allocator(output);
 +			if (cpu_alloc == NULL ||
 +					!output_pick_cursor_format_cpu(output, &format)) {
@@ -177,7 +231,7 @@
  			width, height, &format);
  		wlr_drm_format_finish(&format);
  		if (output->cursor_swapchain == NULL) {
-@@ -256,6 +391,15 @@
+@@ -256,6 +405,15 @@
  	wlr_box_transform(&dst_box, &dst_box, wlr_output_transform_invert(output->transform),
  		buffer->width, buffer->height);
  
