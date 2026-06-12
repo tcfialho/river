@@ -330,6 +330,19 @@ pub fn create(impl: Impl) error{OutOfMemory}!*Window {
 pub fn destroy(window: *Window) void {
     assert(window.impl == .destroying);
 
+    // Windows destroyed before they are ever mapped never go through unmap(),
+    // so the foreign toplevel handles must be destroyed here as well. Otherwise
+    // they leak: foreign-toplevel clients (e.g. taskbars) are left holding a
+    // permanent handle to a window that no longer exists.
+    if (window.foreign_toplevel_handle) |handle| {
+        handle.destroy();
+        window.foreign_toplevel_handle = null;
+    }
+    if (window.wlr_toplevel_handle) |handle| {
+        handle.destroy();
+        window.wlr_toplevel_handle = null;
+    }
+
     switch (window.state) {
         .init => {},
         .closing => {
