@@ -1037,18 +1037,18 @@ pub fn renderFinish(window: *Window) void {
         window.anim = Animation.armFade(.open, window.box.x, window.box.y, 0.0, 1.0, open_scale, 1.0, open_anim_ms, .ease_out);
         Animation.scheduleAllOutputFrames();
     } else if (can_move_anim and (moved or resized)) {
-        // Size tween start ratio = old/new per axis (1.0 when that axis is
-        // unchanged). The client already commits the new-size buffer; scaling it
-        // from old/new -> 1.0 makes the new content appear to zoom from the old
-        // footprint. Guard against zero.
-        const sfx: f32 = if (window.box.width > 0 and old_w > 0)
-            @as(f32, @floatFromInt(old_w)) / @as(f32, @floatFromInt(window.box.width))
-        else
-            1.0;
-        const sfy: f32 = if (window.box.height > 0 and old_h > 0)
-            @as(f32, @floatFromInt(old_h)) / @as(f32, @floatFromInt(window.box.height))
-        else
-            1.0;
+        // Position-only tween. We deliberately do NOT scale the live client
+        // surface during a resize: doing so (setDestSize on the real buffer)
+        // races the client's own buffer commits, which produced deformed and
+        // overlapping windows on swap. With size ratios 1.0/1.0, resizes() and
+        // scales() are both false, so applyScaleXY is never called and the
+        // surface keeps river's native auto-sizing — the window animates to its
+        // new position and the size settles when the client redraws (a frame or
+        // two of old-size-at-new-position, much milder than the deformation).
+        // Smooth content-scaling on resize needs a snapshot buffer (separate,
+        // tested on its own); not attempted here.
+        const sfx: f32 = 1.0;
+        const sfy: f32 = 1.0;
         window.anim = Animation.armMove(
             window.anim,
             old_x,
