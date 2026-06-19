@@ -1047,8 +1047,13 @@ pub fn renderFinish(window: *Window) void {
         window.tree.node.setPosition(old_x, old_y);
         window.popup_tree.node.setPosition(old_x, old_y);
         Animation.scheduleAllOutputFrames();
+    } else if (window.anim != null) {
+        // No geometry change in THIS render sequence, but an animation is in
+        // flight. renderFinish runs on every render sequence (focus changes,
+        // manage_dirty, etc.), not just on geometry changes — so clearing the
+        // animation here would kill any in-flight fade/move after a single tick.
+        // Leave it running; the frame loop owns the node position until it ends.
     } else {
-        window.anim = null;
         window.tree.node.setPosition(window.box.x, window.box.y);
         window.popup_tree.node.setPosition(window.box.x, window.box.y);
     }
