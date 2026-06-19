@@ -38,6 +38,9 @@ const close_anim_ms: u32 = 200;
 /// Scale the window pops from on open / shrinks to on close (P15: 0.65).
 const open_scale: f32 = 0.65;
 const close_scale: f32 = 0.65;
+/// Focus nudge: peak lateral bump (P15: 8px) over this duration (P15: 160ms).
+const nudge_px: f32 = 8;
+const nudge_anim_ms: u32 = 160;
 
 pub const Dimensions = struct {
     width: u31,
@@ -284,6 +287,9 @@ anim: ?Animation = null,
 /// Set true once the first post-map renderFinish has positioned the window, so
 /// the very first layout does not animate the window flying in from the origin.
 anim_positioned: bool = false,
+/// Previous keyboard-focus state, for detecting the focus-gained edge (false->
+/// true) in renderFinish to fire the focus nudge.
+anim_focused: bool = false,
 
 foreign_toplevel_handle: ?*wlr.ExtForeignToplevelHandleV1 = null,
 wlr_toplevel_handle: ?*wlr.ForeignToplevelHandleV1 = null,
@@ -1006,6 +1012,17 @@ pub fn renderFinish(window: *Window) void {
         window.fullscreen_background.node.setEnabled(false);
         window.drawBorders();
     }
+    // Current keyboard-focus state, for the focus-gained nudge.
+    const now_focused = blk: {
+        var it = server.wm.sent.seats.iterator(.forward);
+        while (it.next()) |seat| {
+            if (seat.focused == .window and seat.focused.window == window) break :blk true;
+        }
+        break :blk false;
+    };
+    const focus_gained = enabled and now_focused and !window.anim_focused;
+    window.anim_focused = now_focused;
+
     // Decide how to apply the new position: open-fade, move-tween, or snap.
     const first_show = enabled and !window.anim_positioned and window.wm_requested.fullscreen == null;
     const moved = old_x != window.box.x or old_y != window.box.y;
@@ -1046,6 +1063,15 @@ pub fn renderFinish(window: *Window) void {
         // Leave the node at the start position; the frame loop advances it.
         window.tree.node.setPosition(old_x, old_y);
         window.popup_tree.node.setPosition(old_x, old_y);
+        Animation.scheduleAllOutputFrames();
+    } else if (focus_gained and window.anim == null and can_move_anim) {
+        // Pure focus change (no geometry change, nothing else animating): a brief
+        // lateral nudge on the window that just gained focus. Direction: toward
+        // the window's own side — deck (x>0) bumps right, main bumps left.
+        const dir: f32 = if (window.box.x > 0) nudge_px else -nudge_px;
+        window.anim = Animation.armNudge(window.box.x, window.box.y, dir, nudge_anim_ms);
+        window.tree.node.setPosition(window.box.x, window.box.y);
+        window.popup_tree.node.setPosition(window.box.x, window.box.y);
         Animation.scheduleAllOutputFrames();
     } else if (window.anim != null) {
         // No geometry change in THIS render sequence, but an animation is in

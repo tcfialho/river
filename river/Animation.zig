@@ -30,6 +30,9 @@ pub const Kind = enum {
     open,
     /// Window closing: fade out (opacity 1 -> 0) on the detached saved tree.
     close,
+    /// Focus nudge: a brief lateral bump (0 -> peak -> 0) on the window that
+    /// just gained focus. No fade/scale; position only, returning to rest.
+    nudge,
 };
 
 pub const Easing = enum {
@@ -103,6 +106,11 @@ target_y: f32,
 /// not jump to the stale `box` value (which already holds the previous target).
 last_x: f32,
 last_y: f32,
+
+/// Nudge peak lateral offset (px). For `.nudge`, the applied x is
+/// start_x + nudge_dx * sin(pi * progress): 0 at start/end, peak at the middle.
+/// Zero for non-nudge animations.
+nudge_dx: f32,
 
 /// Opacity endpoints, in [0,1].
 start_opacity: f32,
@@ -191,6 +199,7 @@ pub fn armMove(
         .target_y = @floatFromInt(target_y),
         .last_x = sx,
         .last_y = sy,
+        .nudge_dx = 0,
         .start_opacity = start_opacity,
         .target_opacity = target_opacity,
         .last_opacity = start_opacity,
@@ -243,6 +252,7 @@ pub fn armFade(
         .target_y = fy,
         .last_x = fx,
         .last_y = fy,
+        .nudge_dx = 0,
         .start_opacity = from_opacity,
         .target_opacity = to_opacity,
         .last_opacity = from_opacity,
@@ -260,6 +270,36 @@ pub fn armFade(
 /// True if this animation changes scale at all (so the driver should apply it).
 pub fn scales(anim: Animation) bool {
     return anim.start_scale != anim.target_scale or anim.last_scale != 1.0;
+}
+
+/// Arm a focus nudge: a brief lateral bump of `peak_dx` px around the resting
+/// position (x, y), returning to rest. Position only — no fade, no scale.
+pub fn armNudge(x: i32, y: i32, peak_dx: f32, duration_ms: u32) Animation {
+    const fx: f32 = @floatFromInt(x);
+    const fy: f32 = @floatFromInt(y);
+    return .{
+        .kind = .nudge,
+        .easing = .linear, // the sine shape comes from sample(), not the easing
+        .start_ns = nowNs(),
+        .duration_ns = @as(i64, duration_ms) * std.time.ns_per_ms,
+        .start_x = fx,
+        .start_y = fy,
+        .target_x = fx,
+        .target_y = fy,
+        .last_x = fx,
+        .last_y = fy,
+        .nudge_dx = peak_dx,
+        .start_opacity = 1.0,
+        .target_opacity = 1.0,
+        .last_opacity = 1.0,
+        .start_scale = 1.0,
+        .target_scale = 1.0,
+        .last_scale = 1.0,
+        .start_fx = 1.0,
+        .start_fy = 1.0,
+        .last_fx = 1.0,
+        .last_fy = 1.0,
+    };
 }
 
 /// Normalized eased progress at time `now_ns`, clamped to [0,1].
@@ -290,7 +330,13 @@ pub const Sample = struct {
 /// Compute the interpolated values at `now_ns` and record them as last-applied.
 pub fn sample(anim: *Animation, now_ns: i64) Sample {
     const p = anim.progress(now_ns);
-    const x = anim.start_x + (anim.target_x - anim.start_x) * p;
+    // Nudge: a transient lateral bump that returns to rest — peak*sin(pi*p),
+    // which is 0 at p=0 and p=1 and peaks at p=0.5. (nudge_dx is 0 otherwise.)
+    const bump: f32 = if (anim.nudge_dx != 0)
+        anim.nudge_dx * @sin(std.math.pi * p)
+    else
+        0;
+    const x = anim.start_x + (anim.target_x - anim.start_x) * p + bump;
     const y = anim.start_y + (anim.target_y - anim.start_y) * p;
     const o = anim.start_opacity + (anim.target_opacity - anim.start_opacity) * p;
     const sc = anim.start_scale + (anim.target_scale - anim.start_scale) * p;
