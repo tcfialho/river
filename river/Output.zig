@@ -475,18 +475,6 @@ fn handleFrame(listener: *wl.Listener(*wlr.Output), wlr_output: *wlr.Output) voi
     const orphans_active = Animation.advanceOrphans(now_ns);
     const anim_active = windows_active or orphans_active;
 
-    // TEMP INSTRUMENTATION (maindeck anim runtime test): log EVERY handleFrame
-    // (not gated on anim_active) so we can tell whether the loop self-sustains.
-    // Three-way discriminator: ~60Hz with anim_active true while animating =>
-    // loop healthy; ~60Hz but anim_active flips off after one tick => state
-    // cleared; only a few frames total => scheduleFrame not producing frames.
-    // Remove after the runtime test is validated.
-    if (Animation.anim_trace) {
-        log.info("ANIMTRACE frame t={d}ns active={} (win={} orphan={})", .{
-            now_ns, anim_active, windows_active, orphans_active,
-        });
-    }
-
     // TODO this should probably be retried on failure
     // While animating, force a commit even if the scene reports no damage: a
     // tick that samples the same integer position produces no damage, and
@@ -623,14 +611,6 @@ pub fn advanceAnimations(now_ns: i64) bool {
         const anim = &(window.anim orelse continue);
         const finished = anim.done(now_ns);
         const s = anim.sample(now_ns);
-
-        // TEMP INSTRUMENTATION: per-tick applied position/scale, to prove the
-        // window glides (intermediate positions) rather than snaps. Remove later.
-        if (Animation.anim_trace) {
-            log.info("ANIMTRACE win kind={s} finished={} x={d} y={d} op={d:.2} sc={d:.2} fx={d:.2} fy={d:.2}", .{
-                @tagName(anim.kind), finished, s.x, s.y, s.opacity, s.scale, s.fx, s.fy,
-            });
-        }
 
         // Base position: sampled while animating, snapped to the logical target
         // in window.box on finish.
