@@ -418,8 +418,16 @@ pub const ScaleResult = struct {
 /// multi-buffer windows or fx == fy == 1.0.
 pub fn applyScaleXY(node: *wlr.SceneNode, fx: f32, fy: f32, nat_w: i32, nat_h: i32) ScaleResult {
     if (fx == 1.0 and fy == 1.0) {
-        // Restore natural size in case a prior tick scaled it.
-        if (singleBuffer(node)) |buffer| buffer.setDestSize(nat_w, nat_h);
+        // Restore AUTO sizing, not a fixed size. A scene_surface only re-tracks
+        // the client's committed buffer size while dst is (0,0) — see wlroots
+        // wlr_scene.c:912 (`dst_width == 0 && dst_height == 0`). Writing a fixed
+        // dst here (e.g. nat_w from box.width = the size committed SO FAR) freezes
+        // the surface: in a deck->main swap the client hasn't committed the larger
+        // buffer yet, so the window stays small with garbage in the uncovered slot
+        // (the "stripes on the right") until a later render re-finishes. Passing
+        // (0,0) re-enables auto-tracking so the new buffer is reflected the instant
+        // it lands, no focus change needed. nat_w/nat_h are unused in this branch.
+        if (singleBuffer(node)) |buffer| buffer.setDestSize(0, 0);
         return .{ .dx = 0, .dy = 0, .applied = false };
     }
     const buffer = singleBuffer(node) orelse return .{ .dx = 0, .dy = 0, .applied = false };
