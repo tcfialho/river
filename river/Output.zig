@@ -18,6 +18,7 @@ const river = wayland.server.river;
 const server = &@import("main.zig").server;
 const util = @import("util.zig");
 
+const Animation = @import("Animation.zig");
 const LayerShellOutput = @import("LayerShellOutput.zig");
 const LockSurface = @import("LockSurface.zig");
 const SceneNodeData = @import("SceneNodeData.zig");
@@ -463,13 +464,24 @@ fn handleRequestState(listener: *wl.Listener(*wlr.Output.event.RequestState), ev
 fn handleFrame(listener: *wl.Listener(*wlr.Output), wlr_output: *wlr.Output) void {
     const output: *Output = @fieldParentPtr("frame", listener);
 
+    var now = util.timestamp();
+
+    // Advance MainDeck animations before rendering, so the scene-node mutations
+    // (position/opacity) register damage and are picked up by this same frame.
+    // Drive re-scheduling off our own active flag, independent of needsFrame().
+    const now_ns = @as(i64, now.sec) * std.time.ns_per_s + @as(i64, now.nsec);
+    const anim_active = advanceAnimations(now_ns);
+
     // TODO this should probably be retried on failure
     output.renderAndCommit() catch |err| switch (err) {
         error.CommitFailed => log.err("output commit failed for {s}", .{wlr_output.name}),
     };
 
-    var now = util.timestamp();
     output.scene_output.?.sendFrameDone(&now);
+
+    // Keep the loop alive only while something is animating; stop the instant it
+    // is not (so the compositor returns to idle and does not spin at refresh).
+    if (anim_active) wlr_output.scheduleFrame();
 }
 
 fn renderAndCommit(output: *Output) !void {
@@ -576,6 +588,57 @@ fn renderAndCommit(output: *Output) !void {
                 }
             }
         },
+    }
+}
+
+/// Advance every in-flight window animation to time `now_ns` and apply the
+/// interpolated position/opacity to the scene nodes. Finished animations are
+/// snapped to their target and cleared. Returns true if any animation is still
+/// active (the caller should schedule another frame). Time-based, so calling it
+/// from several outputs in the same vblank just recomputes the same sample.
+pub fn advanceAnimations(now_ns: i64) bool {
+    var any_active = false;
+    var it = server.wm.windows.iterator();
+    while (it.next()) |window| {
+        const anim = &(window.anim orelse continue);
+        const finished = anim.done(now_ns);
+        const s = anim.sample(now_ns);
+
+        // Position: move the window subtree (and its popups) to the sampled spot.
+        // On finish, snap exactly to the logical target in window.box.
+        if (finished) {
+            window.tree.node.setPosition(window.box.x, window.box.y);
+            window.popup_tree.node.setPosition(window.box.x, window.box.y);
+        } else {
+            window.tree.node.setPosition(s.x, s.y);
+            window.popup_tree.node.setPosition(s.x, s.y);
+        }
+
+        // Opacity: only touch buffers when actually fading (open/close), to keep
+        // pure moves free of per-buffer work.
+        switch (anim.kind) {
+            .open, .close => {
+                const opacity: f32 = if (finished) anim.target_opacity else s.opacity;
+                Animation.applyOpacity(&window.surfaces.tree.node, opacity);
+            },
+            .move => {},
+        }
+
+        if (finished) {
+            window.anim = null;
+        } else {
+            any_active = true;
+        }
+    }
+    return any_active;
+}
+
+/// Kick the animation loop: schedule a frame on every output that is on, so the
+/// next vblank runs advanceAnimations. Called when an animation is first armed.
+pub fn scheduleAnimationFrames() void {
+    var it = server.om.outputs.iterator(.forward);
+    while (it.next()) |output| {
+        if (output.wlr_output) |wlr_output| wlr_output.scheduleFrame();
     }
 }
 
