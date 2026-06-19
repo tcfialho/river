@@ -607,15 +607,25 @@ pub fn advanceAnimations(now_ns: i64) bool {
         const finished = anim.done(now_ns);
         const s = anim.sample(now_ns);
 
-        // Position: move the window subtree (and its popups) to the sampled spot.
-        // On finish, snap exactly to the logical target in window.box.
-        if (finished) {
-            window.tree.node.setPosition(window.box.x, window.box.y);
-            window.popup_tree.node.setPosition(window.box.x, window.box.y);
-        } else {
-            window.tree.node.setPosition(s.x, s.y);
-            window.popup_tree.node.setPosition(s.x, s.y);
+        // Base position: sampled while animating, snapped to the logical target
+        // in window.box on finish.
+        const base_x = if (finished) window.box.x else s.x;
+        const base_y = if (finished) window.box.y else s.y;
+
+        // Scale (around center): only when the animation scales. Returns the
+        // recenter offset to add to the window tree node; popups never scale, so
+        // they stay at the un-offset base position. On finish, force natural size.
+        var off_x: i32 = 0;
+        var off_y: i32 = 0;
+        if (anim.scales()) {
+            const f: f32 = if (finished) anim.target_scale else s.scale;
+            const r = Animation.applyScale(&window.surfaces.tree.node, f, window.box.width, window.box.height);
+            off_x = r.dx;
+            off_y = r.dy;
         }
+
+        window.tree.node.setPosition(base_x + off_x, base_y + off_y);
+        window.popup_tree.node.setPosition(base_x, base_y);
 
         // Opacity: apply whenever the animation actually changes opacity (gated on
         // the endpoints, not the kind — a move that interrupts a fade still fades).

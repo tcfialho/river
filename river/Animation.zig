@@ -73,6 +73,13 @@ start_opacity: f32,
 target_opacity: f32,
 last_opacity: f32,
 
+/// Scale endpoints (1.0 = natural size). Applied around the window center via
+/// SceneBuffer.setDestSize; 1.0 -> 1.0 means "no scale" (pure move). The pop on
+/// open (0.65 -> 1) / close (1 -> 0.65) lives here.
+start_scale: f32,
+target_scale: f32,
+last_scale: f32,
+
 /// Fold a monotonic timespec into nanoseconds for trivial subtraction.
 pub fn nowNs() i64 {
     const ts = util.timestamp();
@@ -100,6 +107,8 @@ pub fn armMove(
     var sy: f32 = @floatFromInt(cur_y);
     var start_opacity: f32 = 1.0;
     var target_opacity: f32 = 1.0;
+    var start_scale: f32 = 1.0;
+    var target_scale: f32 = 1.0;
     if (existing) |a| {
         sx = a.last_x;
         sy = a.last_y;
@@ -107,6 +116,9 @@ pub fn armMove(
         // Carry the fade's destination so it finishes; for a move that already
         // ended at full opacity this is just 1.0 -> 1.0 (a no-op opacity track).
         target_opacity = a.target_opacity;
+        // Likewise carry an in-flight scale pop to its target so it lands at 1.0.
+        start_scale = a.last_scale;
+        target_scale = a.target_scale;
     }
 
     return .{
@@ -123,6 +135,9 @@ pub fn armMove(
         .start_opacity = start_opacity,
         .target_opacity = target_opacity,
         .last_opacity = start_opacity,
+        .start_scale = start_scale,
+        .target_scale = target_scale,
+        .last_scale = start_scale,
     };
 }
 
@@ -131,13 +146,18 @@ pub fn fades(anim: Animation) bool {
     return anim.start_opacity != anim.target_opacity;
 }
 
-/// Arm a fade at a fixed position. `kind` is `.open` (0 -> 1) or `.close` (1 -> 0).
+/// Arm an open/close transition at a fixed position: a simultaneous opacity
+/// fade and scale pop. `kind` is `.open` (0->1 opacity, 0.65->1 scale) or
+/// `.close` (1->0 opacity, 1->0.65 scale). Scale is applied around the window
+/// center by the driver.
 pub fn armFade(
     kind: Kind,
     x: i32,
     y: i32,
     from_opacity: f32,
     to_opacity: f32,
+    from_scale: f32,
+    to_scale: f32,
     duration_ms: u32,
     easing: Easing,
 ) Animation {
@@ -157,7 +177,15 @@ pub fn armFade(
         .start_opacity = from_opacity,
         .target_opacity = to_opacity,
         .last_opacity = from_opacity,
+        .start_scale = from_scale,
+        .target_scale = to_scale,
+        .last_scale = from_scale,
     };
+}
+
+/// True if this animation changes scale at all (so the driver should apply it).
+pub fn scales(anim: Animation) bool {
+    return anim.start_scale != anim.target_scale or anim.last_scale != 1.0;
 }
 
 /// Normalized eased progress at time `now_ns`, clamped to [0,1].
@@ -179,6 +207,7 @@ pub const Sample = struct {
     x: i32,
     y: i32,
     opacity: f32,
+    scale: f32,
 };
 
 /// Compute the interpolated values at `now_ns` and record them as last-applied.
@@ -187,13 +216,16 @@ pub fn sample(anim: *Animation, now_ns: i64) Sample {
     const x = anim.start_x + (anim.target_x - anim.start_x) * p;
     const y = anim.start_y + (anim.target_y - anim.start_y) * p;
     const o = anim.start_opacity + (anim.target_opacity - anim.start_opacity) * p;
+    const sc = anim.start_scale + (anim.target_scale - anim.start_scale) * p;
     anim.last_x = x;
     anim.last_y = y;
     anim.last_opacity = o;
+    anim.last_scale = sc;
     return .{
         .x = @intFromFloat(@round(x)),
         .y = @intFromFloat(@round(y)),
         .opacity = o,
+        .scale = sc,
     };
 }
 
@@ -208,6 +240,64 @@ pub fn applyOpacity(node: *wlr.SceneNode, opacity: f32) void {
 
 fn setBufferOpacity(buffer: *wlr.SceneBuffer, _: c_int, _: c_int, opacity: *f32) void {
     buffer.setOpacity(opacity.*);
+}
+
+// --- Scale (around center) -------------------------------------------------
+//
+// There is no node/tree-level scale in this scene graph; scale lives only on
+// SceneBuffer.setDestSize. To scale a window by `f` around its center without
+// reconfiguring the client, we:
+//   - scale the single surface buffer's dest size to (w*f, h*f), computed from
+//     the STABLE natural size `w,h` (the logical box) — never from the buffer's
+//     current dest size, which would compound (f^2, f^3, ...) across ticks;
+//   - shift the window tree node to box.(x,y) + (1-f)*(w,h)/2 to recenter, so
+//     borders and popups (children of the tree) ride along for free.
+//
+// Windows with more than one surface buffer (subsurfaces — rare for tiled apps)
+// are not scaled here (the caller should just fade them). Counting is cheap.
+
+const CountCtx = struct {
+    count: u32 = 0,
+    last: ?*wlr.SceneBuffer = null,
+};
+
+fn countBufferIter(buffer: *wlr.SceneBuffer, _: c_int, _: c_int, ctx: *CountCtx) void {
+    ctx.count += 1;
+    ctx.last = buffer;
+}
+
+/// Number of surface buffers under `node`, and the sole buffer if exactly one.
+fn singleBuffer(node: *wlr.SceneNode) ?*wlr.SceneBuffer {
+    var ctx: CountCtx = .{};
+    node.forEachBuffer(*CountCtx, countBufferIter, &ctx);
+    return if (ctx.count == 1) ctx.last else null;
+}
+
+pub const ScaleResult = struct {
+    /// Position offset to apply to the window tree node so the scale is centered.
+    dx: i32,
+    dy: i32,
+    /// Whether a scale was actually applied (false => caller should not offset).
+    applied: bool,
+};
+
+/// Apply scale `f` to the single surface buffer under `node`, sized from the
+/// stable natural box (nat_w, nat_h). Returns the recentering offset to apply to
+/// the window tree node. No-op (applied=false, zero offset) for multi-buffer
+/// windows or f == 1.0.
+pub fn applyScale(node: *wlr.SceneNode, f: f32, nat_w: i32, nat_h: i32) ScaleResult {
+    if (f == 1.0) {
+        // Restore natural size in case a prior tick scaled it.
+        if (singleBuffer(node)) |buffer| buffer.setDestSize(nat_w, nat_h);
+        return .{ .dx = 0, .dy = 0, .applied = false };
+    }
+    const buffer = singleBuffer(node) orelse return .{ .dx = 0, .dy = 0, .applied = false };
+    const fw: f32 = @as(f32, @floatFromInt(nat_w)) * f;
+    const fh: f32 = @as(f32, @floatFromInt(nat_h)) * f;
+    buffer.setDestSize(@intFromFloat(@round(fw)), @intFromFloat(@round(fh)));
+    const dx: f32 = (1.0 - f) * @as(f32, @floatFromInt(nat_w)) / 2.0;
+    const dy: f32 = (1.0 - f) * @as(f32, @floatFromInt(nat_h)) / 2.0;
+    return .{ .dx = @intFromFloat(@round(dx)), .dy = @intFromFloat(@round(dy)), .applied = true };
 }
 
 // ===========================================================================
@@ -233,6 +323,11 @@ pub const OrphanClose = struct {
     link: wl.list.Link,
     tree: *wlr.SceneTree,
     anim: Animation,
+    /// Window origin and natural size, captured at spawn, to scale around center.
+    x: i32,
+    y: i32,
+    nat_w: i32,
+    nat_h: i32,
 
     fn destroy(orphan: *OrphanClose) void {
         orphan.link.remove();
@@ -274,9 +369,18 @@ fn copyBufferIter(buffer: *wlr.SceneBuffer, sx: c_int, sy: c_int, ctx: *CopyCtx)
 }
 
 /// Snapshot the buffers under `src_node` into a standalone tree placed at (x,y)
-/// in the wm layer, and start a fade-out. No-op if there are no buffers or on
+/// in the wm layer, and start a fade-out + shrink (scale 1 -> `to_scale`) around
+/// the window center (nat_w, nat_h). No-op if there are no buffers or on
 /// allocation failure (the window just disappears, as before).
-pub fn spawnClose(src_node: *wlr.SceneNode, x: i32, y: i32, duration_ms: u32) void {
+pub fn spawnClose(
+    src_node: *wlr.SceneNode,
+    x: i32,
+    y: i32,
+    nat_w: i32,
+    nat_h: i32,
+    to_scale: f32,
+    duration_ms: u32,
+) void {
     ensureOrphanList();
 
     const tree = server.scene.layers.wm.createSceneTree() catch return;
@@ -298,8 +402,12 @@ pub fn spawnClose(src_node: *wlr.SceneNode, x: i32, y: i32, duration_ms: u32) vo
     orphan.* = .{
         .link = undefined,
         .tree = tree,
-        // Fade from fully opaque to transparent at a fixed position.
-        .anim = armFade(.close, 0, 0, 1.0, 0.0, duration_ms, .ease_in),
+        // Fade 1 -> 0 and shrink 1 -> to_scale at the captured position.
+        .anim = armFade(.close, x, y, 1.0, 0.0, 1.0, to_scale, duration_ms, .ease_in),
+        .x = x,
+        .y = y,
+        .nat_w = nat_w,
+        .nat_h = nat_h,
     };
     orphans.append(orphan);
 
@@ -330,6 +438,9 @@ pub fn advanceOrphans(now_ns: i64) bool {
         }
         const s = orphan.anim.sample(now_ns);
         applyOpacity(&orphan.tree.node, s.opacity);
+        // Shrink around center: scale the buffer and offset the tree to recenter.
+        const r = applyScale(&orphan.tree.node, s.scale, orphan.nat_w, orphan.nat_h);
+        orphan.tree.node.setPosition(orphan.x + r.dx, orphan.y + r.dy);
         any_active = true;
     }
     return any_active;

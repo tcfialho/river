@@ -33,6 +33,9 @@ const log = std.log.scoped(.wm);
 const move_anim_ms: u32 = 200;
 const open_anim_ms: u32 = 220;
 const close_anim_ms: u32 = 200;
+/// Scale the window pops from on open / shrinks to on close (P15: 0.65).
+const open_scale: f32 = 0.65;
+const close_scale: f32 = 0.65;
 
 pub const Dimensions = struct {
     width: u31,
@@ -1004,12 +1007,12 @@ pub fn renderFinish(window: *Window) void {
     const moved = old_x != window.box.x or old_y != window.box.y;
     const can_move_anim = enabled and window.wm_requested.fullscreen == null and window.anim_positioned;
     if (first_show) {
-        // First time the window is shown: fade in at its final position (do not
-        // fly in from the origin). Position snaps; opacity tweens 0 -> 1.
+        // First time the window is shown: fade + scale in at its final position
+        // (do not fly in from the origin). Opacity 0->1, scale 0.65->1.
         window.tree.node.setPosition(window.box.x, window.box.y);
         window.popup_tree.node.setPosition(window.box.x, window.box.y);
         Animation.applyOpacity(&window.surfaces.tree.node, 0.0);
-        window.anim = Animation.armFade(.open, window.box.x, window.box.y, 0.0, 1.0, open_anim_ms, .ease_out);
+        window.anim = Animation.armFade(.open, window.box.x, window.box.y, 0.0, 1.0, open_scale, 1.0, open_anim_ms, .ease_out);
         Animation.scheduleAllOutputFrames();
     } else if (can_move_anim and moved) {
         window.anim = Animation.armMove(
@@ -1246,7 +1249,15 @@ pub fn unmap(window: *Window) void {
     // tree and fade it out. This must run while the surface buffers are still in
     // the live tree (before save()/teardown). The orphan outlives this Window.
     if (window.anim_positioned and window.wm_requested.fullscreen == null) {
-        Animation.spawnClose(&window.surfaces.tree.node, window.box.x, window.box.y, close_anim_ms);
+        Animation.spawnClose(
+            &window.surfaces.tree.node,
+            window.box.x,
+            window.box.y,
+            window.box.width,
+            window.box.height,
+            close_scale,
+            close_anim_ms,
+        );
     }
 
     window.surfaces.save();
