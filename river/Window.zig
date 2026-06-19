@@ -30,7 +30,9 @@ const XwaylandWindow = @import("XwaylandWindow.zig");
 const log = std.log.scoped(.wm);
 
 /// MainDeck animation durations (milliseconds). See docs/prototype-anim-p15.html.
-const move_anim_ms: u32 = 200;
+/// Geometry moves use the P15 spring over 0.28s (swap / group grow-shrink); per-
+/// action tuning (quick focus nudge vs. spring) is a Tier 2 refinement.
+const move_anim_ms: u32 = 280;
 const open_anim_ms: u32 = 220;
 const close_anim_ms: u32 = 200;
 /// Scale the window pops from on open / shrinks to on close (P15: 0.65).
@@ -964,11 +966,13 @@ fn presentationHint(window: *Window) river.OutputV1.PresentationMode {
 pub fn renderFinish(window: *Window) void {
     const requested = &window.rendering_requested;
 
-    // Capture the position rendered *before* this sequence, as the start point
-    // for a position tween. window.box.x/y is overwritten with the new target
-    // below (lines applying requested.x/y), so it must be read here first.
+    // Capture the position AND size rendered *before* this sequence, as the
+    // start point for the position tween and the size tween. window.box.* is
+    // overwritten with the new target below, so it must be read here first.
     const old_x = window.box.x;
     const old_y = window.box.y;
+    const old_w = window.box.width;
+    const old_h = window.box.height;
 
     // Keep the scene nodes disabled until the render sequence in which the first
     // dimensions event was sent is completed. If we enable the nodes before the
@@ -1005,6 +1009,7 @@ pub fn renderFinish(window: *Window) void {
     // Decide how to apply the new position: open-fade, move-tween, or snap.
     const first_show = enabled and !window.anim_positioned and window.wm_requested.fullscreen == null;
     const moved = old_x != window.box.x or old_y != window.box.y;
+    const resized = old_w != window.box.width or old_h != window.box.height;
     const can_move_anim = enabled and window.wm_requested.fullscreen == null and window.anim_positioned;
     if (first_show) {
         // First time the window is shown: fade + scale in at its final position
@@ -1014,15 +1019,29 @@ pub fn renderFinish(window: *Window) void {
         Animation.applyOpacity(&window.surfaces.tree.node, 0.0);
         window.anim = Animation.armFade(.open, window.box.x, window.box.y, 0.0, 1.0, open_scale, 1.0, open_anim_ms, .ease_out);
         Animation.scheduleAllOutputFrames();
-    } else if (can_move_anim and moved) {
+    } else if (can_move_anim and (moved or resized)) {
+        // Size tween start ratio = old/new per axis (1.0 when that axis is
+        // unchanged). The client already commits the new-size buffer; scaling it
+        // from old/new -> 1.0 makes the new content appear to zoom from the old
+        // footprint. Guard against zero.
+        const sfx: f32 = if (window.box.width > 0 and old_w > 0)
+            @as(f32, @floatFromInt(old_w)) / @as(f32, @floatFromInt(window.box.width))
+        else
+            1.0;
+        const sfy: f32 = if (window.box.height > 0 and old_h > 0)
+            @as(f32, @floatFromInt(old_h)) / @as(f32, @floatFromInt(window.box.height))
+        else
+            1.0;
         window.anim = Animation.armMove(
             window.anim,
             old_x,
             old_y,
             window.box.x,
             window.box.y,
+            sfx,
+            sfy,
             move_anim_ms,
-            .ease_out,
+            .spring,
         );
         // Leave the node at the start position; the frame loop advances it.
         window.tree.node.setPosition(old_x, old_y);

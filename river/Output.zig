@@ -612,14 +612,16 @@ pub fn advanceAnimations(now_ns: i64) bool {
         const base_x = if (finished) window.box.x else s.x;
         const base_y = if (finished) window.box.y else s.y;
 
-        // Scale (around center): only when the animation scales. Returns the
-        // recenter offset to add to the window tree node; popups never scale, so
-        // they stay at the un-offset base position. On finish, force natural size.
+        // Scale (around center): compose the uniform pop with the per-axis size
+        // tween. Returns the recenter offset for the window tree node; popups
+        // never scale, so they stay at the un-offset base position. On finish,
+        // both land on 1.0 and natural size is restored.
         var off_x: i32 = 0;
         var off_y: i32 = 0;
-        if (anim.scales()) {
-            const f: f32 = if (finished) anim.target_scale else s.scale;
-            const r = Animation.applyScale(&window.surfaces.tree.node, f, window.box.width, window.box.height);
+        if (anim.scales() or anim.resizes()) {
+            const fx: f32 = if (finished) anim.target_scale else s.scale * s.fx;
+            const fy: f32 = if (finished) anim.target_scale else s.scale * s.fy;
+            const r = Animation.applyScaleXY(&window.surfaces.tree.node, fx, fy, window.box.width, window.box.height);
             off_x = r.dx;
             off_y = r.dy;
         }

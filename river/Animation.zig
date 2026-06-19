@@ -36,6 +36,10 @@ pub const Easing = enum {
     linear,
     ease_out,
     ease_in,
+    /// P15 spring: cubic-bezier(0.22, 1, 0.36, 1) — a sharp ease-out (no
+    /// overshoot/bounce despite the name; the control points pull hard toward 1
+    /// early). Used for geometry transitions (swap, group grow/shrink).
+    spring,
 
     /// Map normalized time t in [0,1] to eased progress in [0,1].
     fn apply(easing: Easing, t: f32) f32 {
@@ -45,9 +49,41 @@ pub const Easing = enum {
             .ease_out => 1.0 - (1.0 - t) * (1.0 - t),
             // Quadratic ease-in: gentle start, fast stop.
             .ease_in => t * t,
+            .spring => cubicBezierYForX(t),
         };
     }
 };
+
+// cubic-bezier(0.22, 1, 0.36, 1): control points P1=(0.22,1), P2=(0.36,1),
+// with the implicit P0=(0,0), P3=(1,1). For a given x (= normalized time t),
+// solve x(u)=t for the bezier parameter u by bisection (x is monotonic since
+// both control x-coords are in [0,1]), then evaluate y(u). Dependency-free and
+// cheap (~20 iterations of scalar math per sample).
+const bez_p1x: f32 = 0.22;
+const bez_p1y: f32 = 1.0;
+const bez_p2x: f32 = 0.36;
+const bez_p2y: f32 = 1.0;
+
+fn bezierAxis(u: f32, c1: f32, c2: f32) f32 {
+    const v = 1.0 - u;
+    // 3(1-u)^2 u c1 + 3(1-u) u^2 c2 + u^3   (P0=0, P3=1)
+    return 3.0 * v * v * u * c1 + 3.0 * v * u * u * c2 + u * u * u;
+}
+
+fn cubicBezierYForX(x: f32) f32 {
+    if (x <= 0.0) return 0.0;
+    if (x >= 1.0) return 1.0;
+    var lo: f32 = 0.0;
+    var hi: f32 = 1.0;
+    var u: f32 = x;
+    var i: u32 = 0;
+    while (i < 24) : (i += 1) {
+        const xu = bezierAxis(u, bez_p1x, bez_p2x);
+        if (xu < x) lo = u else hi = u;
+        u = (lo + hi) * 0.5;
+    }
+    return bezierAxis(u, bez_p1y, bez_p2y);
+}
 
 kind: Kind,
 easing: Easing,
@@ -73,12 +109,22 @@ start_opacity: f32,
 target_opacity: f32,
 last_opacity: f32,
 
-/// Scale endpoints (1.0 = natural size). Applied around the window center via
-/// SceneBuffer.setDestSize; 1.0 -> 1.0 means "no scale" (pure move). The pop on
-/// open (0.65 -> 1) / close (1 -> 0.65) lives here.
+/// Uniform scale endpoints (1.0 = natural size), applied around the window
+/// center via SceneBuffer.setDestSize; 1.0 -> 1.0 means "no scale" (pure move).
+/// The open/close pop (0.65 <-> 1) lives here.
 start_scale: f32,
 target_scale: f32,
 last_scale: f32,
+
+/// Size-tween endpoints, as a fraction of the *current committed* buffer size
+/// per axis. A window growing from old size to new (the client already commits
+/// the new-size buffer) starts at old/new (< 1) and ends at 1.0, so the new
+/// content appears to zoom from the old footprint. 1.0/1.0 means "no size tween".
+/// Composed multiplicatively with the uniform scale above.
+start_fx: f32,
+start_fy: f32,
+last_fx: f32,
+last_fy: f32,
 
 /// Fold a monotonic timespec into nanoseconds for trivial subtraction.
 pub fn nowNs() i64 {
@@ -94,12 +140,17 @@ pub fn nowNs() i64 {
 /// the existing animation's real opacity target (e.g. 1.0 for an open fade) and
 /// continues from the current opacity, so the fade still completes during/after
 /// the move. (Opacity is advanced whenever start != target, not gated on kind.)
+/// `start_fx`/`start_fy` are the initial size-tween ratios per axis (old/new of
+/// the committed buffer); pass 1.0/1.0 for a pure move with no size change. The
+/// size tween always ends at 1.0 (natural).
 pub fn armMove(
     existing: ?Animation,
     cur_x: i32,
     cur_y: i32,
     target_x: i32,
     target_y: i32,
+    start_fx: f32,
+    start_fy: f32,
     duration_ms: u32,
     easing: Easing,
 ) Animation {
@@ -109,6 +160,8 @@ pub fn armMove(
     var target_opacity: f32 = 1.0;
     var start_scale: f32 = 1.0;
     var target_scale: f32 = 1.0;
+    var sfx: f32 = start_fx;
+    var sfy: f32 = start_fy;
     if (existing) |a| {
         sx = a.last_x;
         sy = a.last_y;
@@ -119,6 +172,12 @@ pub fn armMove(
         // Likewise carry an in-flight scale pop to its target so it lands at 1.0.
         start_scale = a.last_scale;
         target_scale = a.target_scale;
+        // If a size tween was mid-flight, continue from where it is so a new
+        // layout during the grow/shrink doesn't snap the footprint.
+        if (a.last_fx != 1.0 or a.last_fy != 1.0) {
+            sfx = a.last_fx;
+            sfy = a.last_fy;
+        }
     }
 
     return .{
@@ -138,12 +197,22 @@ pub fn armMove(
         .start_scale = start_scale,
         .target_scale = target_scale,
         .last_scale = start_scale,
+        .start_fx = sfx,
+        .start_fy = sfy,
+        .last_fx = sfx,
+        .last_fy = sfy,
     };
 }
 
 /// True if this animation changes opacity at all (so the driver should apply it).
 pub fn fades(anim: Animation) bool {
     return anim.start_opacity != anim.target_opacity;
+}
+
+/// True if this animation has a size tween (footprint differs from natural).
+pub fn resizes(anim: Animation) bool {
+    return anim.start_fx != 1.0 or anim.start_fy != 1.0 or
+        anim.last_fx != 1.0 or anim.last_fy != 1.0;
 }
 
 /// Arm an open/close transition at a fixed position: a simultaneous opacity
@@ -180,6 +249,11 @@ pub fn armFade(
         .start_scale = from_scale,
         .target_scale = to_scale,
         .last_scale = from_scale,
+        // open/close has no size tween (footprint is natural throughout).
+        .start_fx = 1.0,
+        .start_fy = 1.0,
+        .last_fx = 1.0,
+        .last_fy = 1.0,
     };
 }
 
@@ -208,6 +282,9 @@ pub const Sample = struct {
     y: i32,
     opacity: f32,
     scale: f32,
+    /// Per-axis size-tween factor (start_fx/fy -> 1.0). Composed with `scale`.
+    fx: f32,
+    fy: f32,
 };
 
 /// Compute the interpolated values at `now_ns` and record them as last-applied.
@@ -217,15 +294,22 @@ pub fn sample(anim: *Animation, now_ns: i64) Sample {
     const y = anim.start_y + (anim.target_y - anim.start_y) * p;
     const o = anim.start_opacity + (anim.target_opacity - anim.start_opacity) * p;
     const sc = anim.start_scale + (anim.target_scale - anim.start_scale) * p;
+    // Size tween always lands on 1.0 (natural footprint).
+    const sfx = anim.start_fx + (1.0 - anim.start_fx) * p;
+    const sfy = anim.start_fy + (1.0 - anim.start_fy) * p;
     anim.last_x = x;
     anim.last_y = y;
     anim.last_opacity = o;
     anim.last_scale = sc;
+    anim.last_fx = sfx;
+    anim.last_fy = sfy;
     return .{
         .x = @intFromFloat(@round(x)),
         .y = @intFromFloat(@round(y)),
         .opacity = o,
         .scale = sc,
+        .fx = sfx,
+        .fy = sfy,
     };
 }
 
@@ -281,23 +365,29 @@ pub const ScaleResult = struct {
     applied: bool,
 };
 
-/// Apply scale `f` to the single surface buffer under `node`, sized from the
-/// stable natural box (nat_w, nat_h). Returns the recentering offset to apply to
-/// the window tree node. No-op (applied=false, zero offset) for multi-buffer
-/// windows or f == 1.0.
-pub fn applyScale(node: *wlr.SceneNode, f: f32, nat_w: i32, nat_h: i32) ScaleResult {
-    if (f == 1.0) {
+/// Apply per-axis factors `fx`/`fy` to the single surface buffer under `node`,
+/// sized from the stable natural box (nat_w, nat_h). Used for both the uniform
+/// pop (fx == fy) and the non-uniform size tween (fx != fy). Returns the
+/// recentering offset for the window tree node. No-op (applied=false) for
+/// multi-buffer windows or fx == fy == 1.0.
+pub fn applyScaleXY(node: *wlr.SceneNode, fx: f32, fy: f32, nat_w: i32, nat_h: i32) ScaleResult {
+    if (fx == 1.0 and fy == 1.0) {
         // Restore natural size in case a prior tick scaled it.
         if (singleBuffer(node)) |buffer| buffer.setDestSize(nat_w, nat_h);
         return .{ .dx = 0, .dy = 0, .applied = false };
     }
     const buffer = singleBuffer(node) orelse return .{ .dx = 0, .dy = 0, .applied = false };
-    const fw: f32 = @as(f32, @floatFromInt(nat_w)) * f;
-    const fh: f32 = @as(f32, @floatFromInt(nat_h)) * f;
+    const fw: f32 = @as(f32, @floatFromInt(nat_w)) * fx;
+    const fh: f32 = @as(f32, @floatFromInt(nat_h)) * fy;
     buffer.setDestSize(@intFromFloat(@round(fw)), @intFromFloat(@round(fh)));
-    const dx: f32 = (1.0 - f) * @as(f32, @floatFromInt(nat_w)) / 2.0;
-    const dy: f32 = (1.0 - f) * @as(f32, @floatFromInt(nat_h)) / 2.0;
+    const dx: f32 = (1.0 - fx) * @as(f32, @floatFromInt(nat_w)) / 2.0;
+    const dy: f32 = (1.0 - fy) * @as(f32, @floatFromInt(nat_h)) / 2.0;
     return .{ .dx = @intFromFloat(@round(dx)), .dy = @intFromFloat(@round(dy)), .applied = true };
+}
+
+/// Uniform convenience wrapper (pop): same factor on both axes.
+pub fn applyScale(node: *wlr.SceneNode, f: f32, nat_w: i32, nat_h: i32) ScaleResult {
+    return applyScaleXY(node, f, f, nat_w, nat_h);
 }
 
 // ===========================================================================
