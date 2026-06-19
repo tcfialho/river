@@ -17,7 +17,9 @@ const Animation = @This();
 const std = @import("std");
 const posix = std.posix;
 const wlr = @import("wlroots");
+const wl = @import("wayland").server.wl;
 
+const server = &@import("main.zig").server;
 const util = @import("util.zig");
 
 /// What kind of transition this is — selects easing and (later) effect.
@@ -206,4 +208,138 @@ pub fn applyOpacity(node: *wlr.SceneNode, opacity: f32) void {
 
 fn setBufferOpacity(buffer: *wlr.SceneBuffer, _: c_int, _: c_int, opacity: *f32) void {
     buffer.setOpacity(opacity.*);
+}
+
+// ===========================================================================
+// Orphan close animations.
+//
+// A closing window is torn down by the compositor within the next manage+render
+// cycle after unmap (manageStart flips .closing -> .init -> makeInert/sendClosed,
+// then destroy() frees window.tree) — far sooner than a 200ms fade. So a close
+// animation cannot live on the Window (its scene nodes are freed mid-fade).
+//
+// Instead, at unmap we snapshot the window's buffers into a *standalone* scene
+// tree owned by this subsystem (not window.surfaces.saved_tree, whose dropSaved
+// would destroy the buffers), arm a fade, and advance it in the same output
+// frame loop. The orphan self-destructs when the fade completes; the protocol
+// lifecycle of the real window finishes immediately and independently.
+//
+// Kept deliberately isolated: if the frame-loop damage assumption needs a fix
+// after runtime testing, the position tween and this can be fixed separately.
+// ===========================================================================
+
+/// A close animation that outlives its Window. Owns its scene tree.
+pub const OrphanClose = struct {
+    link: wl.list.Link,
+    tree: *wlr.SceneTree,
+    anim: Animation,
+
+    fn destroy(orphan: *OrphanClose) void {
+        orphan.link.remove();
+        orphan.tree.node.destroy();
+        util.gpa.destroy(orphan);
+    }
+};
+
+/// Intrusive list of in-flight orphan close animations. Empty in steady state.
+var orphans: wl.list.Head(OrphanClose, .link) = undefined;
+var orphans_initialized = false;
+
+fn ensureOrphanList() void {
+    if (!orphans_initialized) {
+        orphans.init();
+        orphans_initialized = true;
+    }
+}
+
+/// Context for copying a window's live buffers into the orphan tree.
+const CopyCtx = struct {
+    dest: *wlr.SceneTree,
+    ok: bool,
+};
+
+fn copyBufferIter(buffer: *wlr.SceneBuffer, sx: c_int, sy: c_int, ctx: *CopyCtx) void {
+    // Scene buffers hold a ref on the underlying wlr.Buffer, so the snapshot
+    // stays valid after the client's surface is gone — same mechanism river's
+    // SaveableSurfaces uses. Mirror dst size / source box / transform so the
+    // copy looks identical to what was on screen.
+    const sb = ctx.dest.createSceneBuffer(buffer.buffer) catch {
+        ctx.ok = false;
+        return;
+    };
+    sb.node.setPosition(sx, sy);
+    sb.setDestSize(buffer.dst_width, buffer.dst_height);
+    sb.setSourceBox(&buffer.src_box);
+    sb.setTransform(buffer.transform);
+}
+
+/// Snapshot the buffers under `src_node` into a standalone tree placed at (x,y)
+/// in the wm layer, and start a fade-out. No-op if there are no buffers or on
+/// allocation failure (the window just disappears, as before).
+pub fn spawnClose(src_node: *wlr.SceneNode, x: i32, y: i32, duration_ms: u32) void {
+    ensureOrphanList();
+
+    const tree = server.scene.layers.wm.createSceneTree() catch return;
+    tree.node.setPosition(x, y);
+
+    var ctx: CopyCtx = .{ .dest = tree, .ok = true };
+    src_node.forEachBuffer(*CopyCtx, copyBufferIter, &ctx);
+
+    // Nothing copied (no buffers, or OOM partway): drop the empty tree.
+    if (!ctx.ok or tree.children.empty()) {
+        tree.node.destroy();
+        return;
+    }
+
+    const orphan = util.gpa.create(OrphanClose) catch {
+        tree.node.destroy();
+        return;
+    };
+    orphan.* = .{
+        .link = undefined,
+        .tree = tree,
+        // Fade from fully opaque to transparent at a fixed position.
+        .anim = armFade(.close, 0, 0, 1.0, 0.0, duration_ms, .ease_in),
+    };
+    orphans.append(orphan);
+
+    // unmap runs outside the frame loop, so kick a frame on every output to
+    // start advancing this fade.
+    scheduleAllOutputFrames();
+}
+
+/// Schedule a frame on every powered output. Used to start the animation loop
+/// from contexts outside handleFrame (e.g. a close spawned at unmap time).
+pub fn scheduleAllOutputFrames() void {
+    var it = server.om.outputs.iterator(.forward);
+    while (it.next()) |output| {
+        if (output.wlr_output) |wlr_output| wlr_output.scheduleFrame();
+    }
+}
+
+/// Advance all orphan close animations to `now_ns`, applying opacity and
+/// destroying any that have finished. Returns true if any remain active.
+pub fn advanceOrphans(now_ns: i64) bool {
+    if (!orphans_initialized) return false;
+    var any_active = false;
+    var it = orphans.safeIterator(.forward);
+    while (it.next()) |orphan| {
+        if (orphan.anim.done(now_ns)) {
+            orphan.destroy();
+            continue;
+        }
+        const s = orphan.anim.sample(now_ns);
+        applyOpacity(&orphan.tree.node, s.opacity);
+        any_active = true;
+    }
+    return any_active;
+}
+
+/// Tear down every in-flight orphan close animation. Call on server shutdown
+/// and output destroy so buffers/trees are not leaked and the frame loop does
+/// not keep scheduling for orphans that can never be seen.
+pub fn destroyAllOrphans() void {
+    if (!orphans_initialized) return;
+    var it = orphans.safeIterator(.forward);
+    while (it.next()) |orphan| orphan.destroy();
 }

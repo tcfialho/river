@@ -1010,7 +1010,7 @@ pub fn renderFinish(window: *Window) void {
         window.popup_tree.node.setPosition(window.box.x, window.box.y);
         Animation.applyOpacity(&window.surfaces.tree.node, 0.0);
         window.anim = Animation.armFade(.open, window.box.x, window.box.y, 0.0, 1.0, open_anim_ms, .ease_out);
-        Output.scheduleAnimationFrames();
+        Animation.scheduleAllOutputFrames();
     } else if (can_move_anim and moved) {
         window.anim = Animation.armMove(
             window.anim,
@@ -1024,7 +1024,7 @@ pub fn renderFinish(window: *Window) void {
         // Leave the node at the start position; the frame loop advances it.
         window.tree.node.setPosition(old_x, old_y);
         window.popup_tree.node.setPosition(old_x, old_y);
-        Output.scheduleAnimationFrames();
+        Animation.scheduleAllOutputFrames();
     } else {
         window.anim = null;
         window.tree.node.setPosition(window.box.x, window.box.y);
@@ -1241,6 +1241,13 @@ pub fn map(window: *Window) !void {
 /// Called by the impl when the surface will no longer be displayed
 pub fn unmap(window: *Window) void {
     log.debug("window '{?s}' unmapped", .{window.getTitle()});
+
+    // Snapshot the window's current buffers into a standalone, compositor-owned
+    // tree and fade it out. This must run while the surface buffers are still in
+    // the live tree (before save()/teardown). The orphan outlives this Window.
+    if (window.anim_positioned and window.wm_requested.fullscreen == null) {
+        Animation.spawnClose(&window.surfaces.tree.node, window.box.x, window.box.y, close_anim_ms);
+    }
 
     window.surfaces.save();
 

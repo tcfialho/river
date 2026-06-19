@@ -16,6 +16,7 @@ const wp = wayland.server.wp;
 const util = @import("util.zig");
 
 const IdleInhibitManager = @import("IdleInhibitManager.zig");
+const Animation = @import("Animation.zig");
 const InputManager = @import("InputManager.zig");
 const LockManager = @import("LockManager.zig");
 const Output = @import("Output.zig");
@@ -326,6 +327,10 @@ pub fn deinit(server: *Server) void {
     server.wl_server.destroyClients();
 
     server.backend.destroy();
+
+    // Free any in-flight orphan close animations (heap structs + their standalone
+    // scene trees) before tearing down the parent scene graph.
+    Animation.destroyAllOrphans();
 
     // The scene graph needs to be destroyed after the backend but before the renderer
     // Output destruction requires the scene graph to still be around while the scene

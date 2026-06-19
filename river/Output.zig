@@ -470,7 +470,10 @@ fn handleFrame(listener: *wl.Listener(*wlr.Output), wlr_output: *wlr.Output) voi
     // (position/opacity) register damage and are picked up by this same frame.
     // Drive re-scheduling off our own active flag, independent of needsFrame().
     const now_ns = @as(i64, now.sec) * std.time.ns_per_s + @as(i64, now.nsec);
-    const anim_active = advanceAnimations(now_ns);
+    // Window position/open animations and orphan close animations share the loop.
+    const windows_active = advanceAnimations(now_ns);
+    const orphans_active = Animation.advanceOrphans(now_ns);
+    const anim_active = windows_active or orphans_active;
 
     // TODO this should probably be retried on failure
     output.renderAndCommit() catch |err| switch (err) {
@@ -629,15 +632,6 @@ pub fn advanceAnimations(now_ns: i64) bool {
         }
     }
     return any_active;
-}
-
-/// Kick the animation loop: schedule a frame on every output that is on, so the
-/// next vblank runs advanceAnimations. Called when an animation is first armed.
-pub fn scheduleAnimationFrames() void {
-    var it = server.om.outputs.iterator(.forward);
-    while (it.next()) |output| {
-        if (output.wlr_output) |wlr_output| wlr_output.scheduleFrame();
-    }
 }
 
 fn handlePresent(
