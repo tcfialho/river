@@ -80,6 +80,11 @@ pub fn nowNs() i64 {
 /// Arm a position tween from `cur` toward `target`. If an animation is already
 /// in flight, start from the last applied position (not `cur`), so a new layout
 /// arriving mid-tween continues smoothly instead of jumping.
+///
+/// A move that interrupts an in-flight fade must NOT freeze the fade: it carries
+/// the existing animation's real opacity target (e.g. 1.0 for an open fade) and
+/// continues from the current opacity, so the fade still completes during/after
+/// the move. (Opacity is advanced whenever start != target, not gated on kind.)
 pub fn armMove(
     existing: ?Animation,
     cur_x: i32,
@@ -89,10 +94,18 @@ pub fn armMove(
     duration_ms: u32,
     easing: Easing,
 ) Animation {
-    const sx: f32, const sy: f32, const so: f32 = if (existing) |a|
-        .{ a.last_x, a.last_y, a.last_opacity }
-    else
-        .{ @floatFromInt(cur_x), @floatFromInt(cur_y), 1.0 };
+    var sx: f32 = @floatFromInt(cur_x);
+    var sy: f32 = @floatFromInt(cur_y);
+    var start_opacity: f32 = 1.0;
+    var target_opacity: f32 = 1.0;
+    if (existing) |a| {
+        sx = a.last_x;
+        sy = a.last_y;
+        start_opacity = a.last_opacity;
+        // Carry the fade's destination so it finishes; for a move that already
+        // ended at full opacity this is just 1.0 -> 1.0 (a no-op opacity track).
+        target_opacity = a.target_opacity;
+    }
 
     return .{
         .kind = .move,
@@ -105,10 +118,15 @@ pub fn armMove(
         .target_y = @floatFromInt(target_y),
         .last_x = sx,
         .last_y = sy,
-        .start_opacity = so,
-        .target_opacity = so,
-        .last_opacity = so,
+        .start_opacity = start_opacity,
+        .target_opacity = target_opacity,
+        .last_opacity = start_opacity,
     };
+}
+
+/// True if this animation changes opacity at all (so the driver should apply it).
+pub fn fades(anim: Animation) bool {
+    return anim.start_opacity != anim.target_opacity;
 }
 
 /// Arm a fade at a fixed position. `kind` is `.open` (0 -> 1) or `.close` (1 -> 0).

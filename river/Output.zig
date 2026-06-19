@@ -614,14 +614,12 @@ pub fn advanceAnimations(now_ns: i64) bool {
             window.popup_tree.node.setPosition(s.x, s.y);
         }
 
-        // Opacity: only touch buffers when actually fading (open/close), to keep
-        // pure moves free of per-buffer work.
-        switch (anim.kind) {
-            .open, .close => {
-                const opacity: f32 = if (finished) anim.target_opacity else s.opacity;
-                Animation.applyOpacity(&window.surfaces.tree.node, opacity);
-            },
-            .move => {},
+        // Opacity: apply whenever the animation actually changes opacity (gated on
+        // the endpoints, not the kind — a move that interrupts a fade still fades).
+        // Pure moves (1.0 -> 1.0) skip the per-buffer walk.
+        if (anim.fades()) {
+            const opacity: f32 = if (finished) anim.target_opacity else s.opacity;
+            Animation.applyOpacity(&window.surfaces.tree.node, opacity);
         }
 
         if (finished) {
