@@ -527,7 +527,9 @@ pub fn spawnClose(
 ) void {
     ensureOrphanList();
 
-    const tree = server.scene.layers.wm.createSceneTree() catch return;
+    // Use the dedicated close_overlay layer (above live windows, below the bar)
+    // so the fade is not occluded by a window the WM raises into the same slot.
+    const tree = server.scene.layers.close_overlay.createSceneTree() catch return;
     tree.node.setPosition(x, y);
 
     var ctx: CopyCtx = .{ .dest = tree, .ok = true };
