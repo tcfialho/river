@@ -627,8 +627,12 @@ pub fn advanceAnimations(now_ns: i64) bool {
             const fx: f32 = if (finished) anim.target_scale else s.scale * s.fx;
             const fy: f32 = if (finished) anim.target_scale else s.scale * s.fy;
             const r = Animation.applyScaleXY(&window.surfaces.tree.node, fx, fy, window.box.width, window.box.height);
-            off_x = r.dx;
-            off_y = r.dy;
+            // anchor_origin grows from the top-left corner: keep the recenter
+            // offset out so the window expands rightward instead of drifting.
+            if (!anim.anchor_origin) {
+                off_x = r.dx;
+                off_y = r.dy;
+            }
         }
 
         window.tree.node.setPosition(base_x + off_x, base_y + off_y);
