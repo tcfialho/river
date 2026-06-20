@@ -969,6 +969,21 @@ fn presentationHint(window: *Window) river.OutputV1.PresentationMode {
     };
 }
 
+/// Count managed windows currently visible in the layout: mapped, not hidden
+/// (so deck-overflow and minimized windows don't count), and top-level (no
+/// parent, so dialogs/children don't count). Used to gate the lone-window grow
+/// reveal. Reads global state, not intent — safe, unlike drag heuristics.
+fn visibleManagedCount() usize {
+    var n: usize = 0;
+    var it = server.wm.windows.iterator();
+    while (it.next()) |w| {
+        if (w.state == .mapped and !w.rendering_requested.hidden and w.getParent() == null) {
+            n += 1;
+        }
+    }
+    return n;
+}
+
 pub fn renderFinish(window: *Window) void {
     const requested = &window.rendering_requested;
 
@@ -1037,18 +1052,28 @@ pub fn renderFinish(window: *Window) void {
         window.anim = Animation.armFade(.open, window.box.x, window.box.y, 0.0, 1.0, open_scale, 1.0, open_anim_ms, .ease_out);
         Animation.scheduleAllOutputFrames();
     } else if (can_move_anim and (moved or resized)) {
-        // Position-only tween. We deliberately do NOT scale the live client
-        // surface during a resize: doing so (setDestSize on the real buffer)
-        // races the client's own buffer commits, which produced deformed and
-        // overlapping windows on swap. With size ratios 1.0/1.0, resizes() and
-        // scales() are both false, so applyScaleXY is never called and the
-        // surface keeps river's native auto-sizing — the window animates to its
-        // new position and the size settles when the client redraws (a frame or
-        // two of old-size-at-new-position, much milder than the deformation).
-        // Smooth content-scaling on resize needs a snapshot buffer (separate,
-        // tested on its own); not attempted here.
-        const sfx: f32 = 1.0;
+        // Position tween by default. We deliberately do NOT scale the live client
+        // surface during a normal resize: setDestSize on the real buffer races
+        // the client's own commits and produced deformed, overlapping windows on
+        // swap. With size ratios 1.0/1.0, resizes()/scales() are false, so
+        // applyScaleXY never runs and the surface keeps river's native auto-size.
+        //
+        // EXCEPTION — the lone-window grow REVEAL: when exactly ONE managed
+        // window is visible and it grew (the last deck window closed and main
+        // expands to fill the screen), reveal it via a growing CLIP instead of a
+        // texture scale. The content stays at its final committed size (no
+        // distortion / glitch — unlike the reverted scale version); a clip
+        // rectangle grows left-to-right from the old footprint to full width.
+        // Fail-safe vs the swap overlap regression: that needed TWO windows
+        // crossing the screen center, impossible with one visible window.
+        var sfx: f32 = 1.0;
         const sfy: f32 = 1.0;
+        var clip_reveal = false;
+        const grew = window.box.width > old_w;
+        if (grew and old_w > 0 and visibleManagedCount() == 1) {
+            sfx = @as(f32, @floatFromInt(old_w)) / @as(f32, @floatFromInt(window.box.width));
+            clip_reveal = true;
+        }
         window.anim = Animation.armMove(
             window.anim,
             old_x,
@@ -1060,6 +1085,7 @@ pub fn renderFinish(window: *Window) void {
             move_anim_ms,
             .spring,
         );
+        window.anim.?.clip_reveal = clip_reveal;
         // Leave the node at the start position; the frame loop advances it.
         window.tree.node.setPosition(old_x, old_y);
         window.popup_tree.node.setPosition(old_x, old_y);

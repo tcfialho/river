@@ -623,7 +623,16 @@ pub fn advanceAnimations(now_ns: i64) bool {
         // both land on 1.0 and natural size is restored.
         var off_x: i32 = 0;
         var off_y: i32 = 0;
-        if (anim.scales() or anim.resizes()) {
+        if (anim.clip_reveal) {
+            // Lone-window grow: reveal via a growing clip, never a texture scale,
+            // so the content is not distorted. On finish, clear the clip so the
+            // full surface shows.
+            if (finished) {
+                Animation.clearClipReveal(window.surfaces.tree);
+            } else {
+                Animation.applyClipReveal(window.surfaces.tree, s.fx, window.box.width, window.box.height);
+            }
+        } else if (anim.scales() or anim.resizes()) {
             const fx: f32 = if (finished) anim.target_scale else s.scale * s.fx;
             const fy: f32 = if (finished) anim.target_scale else s.scale * s.fy;
             const r = Animation.applyScaleXY(&window.surfaces.tree.node, fx, fy, window.box.width, window.box.height);

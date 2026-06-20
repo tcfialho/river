@@ -134,6 +134,14 @@ start_fy: f32,
 last_fx: f32,
 last_fy: f32,
 
+/// When true, the per-axis factor (fx) drives a CLIP REVEAL instead of a texture
+/// scale: the surface stays at its final committed size (no distortion), and a
+/// clip rectangle grows from start_fx*width to full width, revealing the content
+/// left-to-right. Used for the lone-window grow (main filling the freed deck
+/// space). The driver (Output.advanceAnimations) applies/clears the clip and
+/// must clamp the revealed width to the committed buffer to avoid a blank strip.
+clip_reveal: bool = false,
+
 /// Fold a monotonic timespec into nanoseconds for trivial subtraction.
 pub fn nowNs() i64 {
     const ts = util.timestamp();
@@ -410,6 +418,36 @@ pub const ScaleResult = struct {
     /// Whether a scale was actually applied (false => caller should not offset).
     applied: bool,
 };
+
+/// Reveal the surface under `node` left-to-right via a growing clip rectangle of
+/// width `frac * full_w` (clamped to the committed buffer width to avoid a blank
+/// strip on the right when the client hasn't drawn the full size yet). Height is
+/// always full. `frac` in (0,1]. The content is NOT scaled — it stays at its
+/// committed size, so there is no distortion. Pass frac >= 1.0 (or call
+/// clearClipReveal) to remove the clip. No-op if not a single-buffer surface.
+pub fn applyClipReveal(tree: *wlr.SceneTree, frac: f32, full_w: i32, full_h: i32) void {
+    var revealed: i32 = @intFromFloat(@round(@as(f32, @floatFromInt(full_w)) * frac));
+    // Clamp to the buffer the client has actually committed: revealing past it
+    // would expose an empty region (the "stripes on the right").
+    if (singleBuffer(&tree.node)) |buffer| {
+        if (buffer.buffer) |buf| {
+            if (revealed > buf.width) revealed = buf.width;
+        }
+    }
+    if (revealed < 1) revealed = 1;
+    const clip: wlr.Box = .{ .x = 0, .y = 0, .width = revealed, .height = full_h };
+    if (!tree.children.empty()) {
+        tree.node.subsurfaceTreeSetClip(&clip);
+    }
+}
+
+/// Remove any clip applied by applyClipReveal (restore the full surface).
+pub fn clearClipReveal(tree: *wlr.SceneTree) void {
+    const empty: wlr.Box = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    if (!tree.children.empty()) {
+        tree.node.subsurfaceTreeSetClip(&empty);
+    }
+}
 
 /// Apply per-axis factors `fx`/`fy` to the single surface buffer under `node`,
 /// sized from the stable natural box (nat_w, nat_h). Used for both the uniform
