@@ -95,6 +95,12 @@ easing: Easing,
 start_ns: i64,
 duration_ns: i64,
 
+/// Optional delay before the animation starts progressing, in nanoseconds. The
+/// animation holds at progress 0 (its start state) for this long after start_ns,
+/// then runs for duration_ns. Used to sequence the lone-window grow AFTER the
+/// close fade so the two don't visually compete. 0 = start immediately.
+delay_ns: i64 = 0,
+
 /// Position endpoints (logical coordinates, top-left of the window box).
 start_x: f32,
 start_y: f32,
@@ -313,16 +319,17 @@ pub fn armNudge(x: i32, y: i32, peak_dx: f32, duration_ms: u32) Animation {
 /// Normalized eased progress at time `now_ns`, clamped to [0,1].
 fn progress(anim: Animation, now_ns: i64) f32 {
     if (anim.duration_ns <= 0) return 1.0;
-    const elapsed = now_ns - anim.start_ns;
+    // Hold at 0 during the optional pre-roll delay, then measure from its end.
+    const elapsed = now_ns - anim.start_ns - anim.delay_ns;
     if (elapsed <= 0) return 0.0;
     if (elapsed >= anim.duration_ns) return 1.0;
     const t = @as(f32, @floatFromInt(elapsed)) / @as(f32, @floatFromInt(anim.duration_ns));
     return anim.easing.apply(t);
 }
 
-/// True once the animation has reached or passed its end time.
+/// True once the animation has reached or passed its end time (delay included).
 pub fn done(anim: Animation, now_ns: i64) bool {
-    return now_ns - anim.start_ns >= anim.duration_ns;
+    return now_ns - anim.start_ns >= anim.delay_ns + anim.duration_ns;
 }
 
 pub const Sample = struct {

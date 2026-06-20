@@ -34,7 +34,14 @@ const log = std.log.scoped(.wm);
 /// action tuning (quick focus nudge vs. spring) is a Tier 2 refinement.
 const move_anim_ms: u32 = 280;
 const open_anim_ms: u32 = 220;
-const close_anim_ms: u32 = 200;
+const close_anim_ms: u32 = 180; // 10% faster than the old 200 (user request)
+/// Lone-window grow reveal: OVERLAPS the tail of the close fade for fluidity —
+/// the growth starts while the closing window is still fading out (not a dead
+/// serial pause), then continues alone. With the fade at close_anim_ms (180) and
+/// the reveal delayed grow_reveal_delay_ms (80), the two cross over ~80-180ms;
+/// the reveal then runs to ~480ms with ease-out so the growth is what reads.
+const grow_reveal_ms: u32 = 400;
+const grow_reveal_delay_ms: u32 = 80;
 /// Scale the window pops from on open / shrinks to on close (P15: 0.65).
 const open_scale: f32 = 0.65;
 const close_scale: f32 = 0.65;
@@ -1074,6 +1081,11 @@ pub fn renderFinish(window: *Window) void {
             sfx = @as(f32, @floatFromInt(old_w)) / @as(f32, @floatFromInt(window.box.width));
             clip_reveal = true;
         }
+        // The grow reveal gets its own longer duration + ease-out (so the growth
+        // reads), and a pre-roll delay so it plays AFTER the close fade. A normal
+        // move keeps the snappy spring with no delay.
+        const dur: u32 = if (clip_reveal) grow_reveal_ms else move_anim_ms;
+        const ease: Animation.Easing = if (clip_reveal) .ease_out else .spring;
         window.anim = Animation.armMove(
             window.anim,
             old_x,
@@ -1082,10 +1094,13 @@ pub fn renderFinish(window: *Window) void {
             window.box.y,
             sfx,
             sfy,
-            move_anim_ms,
-            .spring,
+            dur,
+            ease,
         );
         window.anim.?.clip_reveal = clip_reveal;
+        if (clip_reveal) {
+            window.anim.?.delay_ns = @as(i64, grow_reveal_delay_ms) * std.time.ns_per_ms;
+        }
         // Leave the node at the start position; the frame loop advances it.
         window.tree.node.setPosition(old_x, old_y);
         window.popup_tree.node.setPosition(old_x, old_y);
