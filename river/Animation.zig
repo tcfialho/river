@@ -134,12 +134,6 @@ start_fy: f32,
 last_fx: f32,
 last_fy: f32,
 
-/// When true, the size tween grows from the window's top-left corner instead of
-/// its center: the driver does NOT apply applyScaleXY's recenter offset. Used
-/// for the lone-window grow (main expanding to fill the freed deck space), where
-/// the left edge is fixed and the window should expand rightward, not drift.
-anchor_origin: bool = false,
-
 /// Fold a monotonic timespec into nanoseconds for trivial subtraction.
 pub fn nowNs() i64 {
     const ts = util.timestamp();
