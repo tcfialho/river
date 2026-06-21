@@ -21,10 +21,7 @@ pub fn build(b: *Build) !void {
     const pie = b.option(bool, "pie", "Build a Position Independent Executable") orelse false;
     const use_llvm = b.option(bool, "llvm", "Force use of Zig's LLVM backend and the lld linker");
 
-    const omit_frame_pointer = switch (optimize) {
-        .Debug, .ReleaseSafe => false,
-        .ReleaseFast, .ReleaseSmall => true,
-    };
+    const omit_frame_pointer = false;
 
     const man_pages = b.option(
         bool,
@@ -123,7 +120,7 @@ pub fn build(b: *Build) !void {
     scanner.generate("wp_color_manager_v1", 2);
     scanner.generate("wp_color_representation_manager_v1", 1);
 
-    scanner.generate("river_window_manager_v1", 5);
+    scanner.generate("river_window_manager_v1", 6);
     scanner.generate("river_xkb_bindings_v1", 3);
     scanner.generate("river_layer_shell_v1", 1);
     scanner.generate("river_input_manager_v1", 2);
@@ -184,6 +181,7 @@ pub fn build(b: *Build) !void {
         river.root_module.linkSystemLibrary(wlroots_pkgconf, .{});
         river.root_module.linkSystemLibrary("xkbcommon", .{});
         river.root_module.linkSystemLibrary("pixman-1", .{});
+        river.root_module.linkSystemLibrary("mimalloc", .{});
 
         // Prefer libraries installed next to the binary (e.g. the locally
         // patched wlroots in ~/.local/lib when river lives in ~/.local/bin)
@@ -206,6 +204,8 @@ pub fn build(b: *Build) !void {
 
         river.pie = pie;
         river.root_module.omit_frame_pointer = omit_frame_pointer;
+        river.link_gc_sections = false;
+        river.link_emit_relocs = true;
 
         b.installArtifact(river);
     }

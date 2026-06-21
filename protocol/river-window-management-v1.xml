@@ -34,7 +34,7 @@
     document are to be interpreted as described in IETF RFC 2119.
   </description>
 
-  <interface name="river_window_manager_v1" version="5">
+  <interface name="river_window_manager_v1" version="6">
     <description summary="window manager global interface">
       This global interface should only be advertised to the window manager
       process. Only one window management client may be active at a time. The
@@ -1135,6 +1135,59 @@
       </description>
       <arg name="count" type="uint" summary="count of screen capture sessions"/>
     </event>
+
+    <enum name="animation_intent">
+      <description summary="animation intent enum for this window action">
+        Intent declarations allow the WM to explicitly specify which animation
+        effect should be applied to this window. The compositor uses this to
+        select easing, duration, and visual effect (fade/slide/reflow/spring).
+      </description>
+      <entry name="none" value="0x0" summary="no animation"/>
+      <entry name="fade_open" value="0x1" summary="open solo: scale fade in"/>
+      <entry name="fade_close" value="0x2" summary="close solo: scale fade out"/>
+      <entry name="slide_close" value="0x3" summary="close main: slide left"/>
+      <entry name="slide_deck_out" value="0x4" summary="close deck: slide right"/>
+      <entry name="slide_in" value="0x5" summary="open group: slide in left"/>
+      <entry name="reflow_ease" value="0x6" summary="geometry only, ease-in-out"/>
+      <entry name="spring" value="0x7" summary="spring geometry change"/>
+      <entry name="nudge" value="0x8" summary="focus nudge: small lateral translate"/>
+      <entry name="fs_carousel" value="0x9" summary="fullscreen carousel switch"/>
+      <entry name="minimize" value="0xa" summary="minimize: scale fade down"/>
+      <entry name="unminimize" value="0xb" summary="unminimize: scale fade up"/>
+    </enum>
+
+    <enum name="animation_easing">
+      <description summary="easing function selector">
+        Easing curves applied during animation. The compositor interprets these
+        and applies the corresponding easing function to the animation progress.
+      </description>
+      <entry name="linear" value="0x0" summary="linear interpolation"/>
+      <entry name="ease_in" value="0x1" summary="quadratic ease in"/>
+      <entry name="ease_out" value="0x2" summary="quadratic ease out"/>
+      <entry name="ease_in_out" value="0x3" summary="quadratic ease in-out"/>
+      <entry name="cubic_spring" value="0x4" summary="cubic spring (0.22,1,0.36,1)"/>
+    </enum>
+
+    <request name="set_animation_intent" since="6">
+      <description summary="declare animation intent for this window action">
+        Inform the compositor of the intended animation effect for this window
+        state change. The compositor will select the appropriate visual effect
+        (fade, slide, reflow, spring, etc.) based on the intent.
+
+        The intent is applied to the next render_finish following this request.
+        Specifying NONE (0x0) indicates no animation should be applied.
+
+        Duration in milliseconds. If 0, the intent's default duration is used.
+        Easing selects the interpolation curve. If not specified, the intent's
+        default easing is used.
+
+        This request modifies rendering state and may only be made as part of
+        a manage or render sequence, see the river_window_manager_v1 description.
+      </description>
+      <arg name="intent" type="uint" enum="animation_intent" summary="animation intent"/>
+      <arg name="duration_ms" type="uint" summary="duration in milliseconds, 0 for default"/>
+      <arg name="easing" type="uint" enum="animation_easing" summary="easing function, 0 for default"/>
+    </request>
   </interface>
 
   <interface name="river_decoration_v1" version="5">
