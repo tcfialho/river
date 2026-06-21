@@ -33,6 +33,14 @@ pub const Kind = enum {
     /// Focus nudge: a brief lateral bump (0 -> peak -> 0) on the window that
     /// just gained focus. No fade/scale; position only, returning to rest.
     nudge,
+    /// P17 directional solid slide: a horizontal glide at fixed opacity and
+    /// scale (no fade, no pop). Used for the group-open entrance (slides in
+    /// from the left) and the deck/main directional closes (slide out right/
+    /// left). Position-only like `move`, but a first-class kind because "slide"
+    /// is a distinct visual contract in P17 (3 of the 5 open/close cases) — it
+    /// must never fade. The entrance variant additionally sets
+    /// `is_entrance_slide` so a mid-glide resize cannot clobber it.
+    slide,
 };
 
 pub const Easing = enum {
@@ -59,9 +67,14 @@ pub const Easing = enum {
 
 // cubic-bezier(0.22, 1, 0.36, 1): control points P1=(0.22,1), P2=(0.36,1),
 // with the implicit P0=(0,0), P3=(1,1). For a given x (= normalized time t),
-// solve x(u)=t for the bezier parameter u by bisection (x is monotonic since
-// both control x-coords are in [0,1]), then evaluate y(u). Dependency-free and
-// cheap (~20 iterations of scalar math per sample).
+// solve x(u)=t for the bezier parameter u, then evaluate y(u). Dependency-free.
+//
+// Root finding is Newton-Raphson (WebKit UnitBezier approach): x(u) is monotonic
+// on [0,1] (both control x-coords are in [0,1]) and well-behaved, so Newton
+// converges in ~4 iterations from u0 = x. A bisection fallback covers the cases
+// where Newton leaves [0,1] or the derivative is ~0 (flat region). This finds the
+// SAME root the old 24-step pure bisection did — the curve, and thus the
+// animation feel, is unchanged; only the iteration count drops.
 const bez_p1x: f32 = 0.22;
 const bez_p1y: f32 = 1.0;
 const bez_p2x: f32 = 0.36;
@@ -73,19 +86,44 @@ fn bezierAxis(u: f32, c1: f32, c2: f32) f32 {
     return 3.0 * v * v * u * c1 + 3.0 * v * u * u * c2 + u * u * u;
 }
 
-fn cubicBezierYForX(x: f32) f32 {
-    if (x <= 0.0) return 0.0;
-    if (x >= 1.0) return 1.0;
+/// d/du of bezierAxis at u (for Newton's method).
+fn bezierAxisDeriv(u: f32, c1: f32, c2: f32) f32 {
+    const v = 1.0 - u;
+    // 3(1-u)^2 c1 + 6(1-u) u (c2 - c1) + 3 u^2 (1 - c2)
+    return 3.0 * v * v * c1 + 6.0 * v * u * (c2 - c1) + 3.0 * u * u * (1.0 - c2);
+}
+
+/// Solve bezierAxis(u) = x for u in [0,1]. Newton-Raphson with a bisection
+/// fallback; converges to the same root as a full bisection sweep.
+fn solveBezierU(x: f32) f32 {
+    var u: f32 = x; // u0 = x is an excellent seed for a near-diagonal x-curve.
+    var i: u32 = 0;
+    while (i < 8) : (i += 1) {
+        const xu = bezierAxis(u, bez_p1x, bez_p2x) - x;
+        if (@abs(xu) < 1e-5) return u;
+        const d = bezierAxisDeriv(u, bez_p1x, bez_p2x);
+        if (@abs(d) < 1e-6) break; // derivative too small: hand off to bisection.
+        u -= xu / d;
+        if (u < 0.0 or u > 1.0) break; // left the domain: hand off to bisection.
+    }
+    // Fallback: a few bisection steps from the full bracket. Reached only for the
+    // rare flat-derivative / out-of-domain cases above.
     var lo: f32 = 0.0;
     var hi: f32 = 1.0;
-    var u: f32 = x;
-    var i: u32 = 0;
+    u = x;
+    i = 0;
     while (i < 24) : (i += 1) {
         const xu = bezierAxis(u, bez_p1x, bez_p2x);
         if (xu < x) lo = u else hi = u;
         u = (lo + hi) * 0.5;
     }
-    return bezierAxis(u, bez_p1y, bez_p2y);
+    return u;
+}
+
+fn cubicBezierYForX(x: f32) f32 {
+    if (x <= 0.0) return 0.0;
+    if (x >= 1.0) return 1.0;
+    return bezierAxis(solveBezierU(x), bez_p1y, bez_p2y);
 }
 
 kind: Kind,
@@ -306,7 +344,7 @@ pub fn armSlide(x: i32, y: i32, dx: f32, duration_ms: u32, easing: Easing) Anima
     const fx: f32 = @floatFromInt(x);
     const fy: f32 = @floatFromInt(y);
     return .{
-        .kind = .move,
+        .kind = .slide,
         .easing = easing,
         .start_ns = nowNs(),
         .duration_ns = @as(i64, duration_ms) * std.time.ns_per_ms,
