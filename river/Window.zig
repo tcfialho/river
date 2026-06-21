@@ -38,10 +38,10 @@ const close_anim_ms: u32 = 180; // 10% faster than the old 200 (user request)
 /// Lone-window grow reveal: OVERLAPS the tail of the close fade for fluidity —
 /// the growth starts while the closing window is still fading out (not a dead
 /// serial pause), then continues alone. With the fade at close_anim_ms (180) and
-/// the reveal delayed grow_reveal_delay_ms (80), the two cross over ~80-180ms;
-/// the reveal then runs to ~480ms with ease-out so the growth is what reads.
-const grow_reveal_ms: u32 = 400;
-const grow_reveal_delay_ms: u32 = 80;
+/// the reveal delayed grow_reveal_delay_ms (120), the two cross over ~120-180ms;
+/// the reveal then runs to ~360ms with ease-out so the growth is what reads.
+const grow_reveal_ms: u32 = 240;
+const grow_reveal_delay_ms: u32 = 120;
 /// Scale the window pops from on open / shrinks to on close (P15: 0.65).
 const open_scale: f32 = 0.65;
 const close_scale: f32 = 0.65;
