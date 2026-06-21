@@ -10,4 +10,5 @@ zig-pkg/
 perf_river.data
 perf_river.data.old
 *.fdata
+*.bolt
 build.zig.bak
