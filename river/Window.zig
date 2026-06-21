@@ -152,6 +152,9 @@ const RenderingRequested = struct {
     border: Border,
     clip: wlr.Box,
     content_clip: wlr.Box,
+    animation_intent: u32 = 0,           // AnimationIntent enum value
+    animation_duration_ms: u32 = 0,      // Duration in milliseconds (0 = default)
+    animation_easing: u32 = 0,           // AnimationEasing enum value
 
     pub const init: RenderingRequested = .{
         .x = 0,
@@ -160,6 +163,9 @@ const RenderingRequested = struct {
         .border = .{},
         .clip = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
         .content_clip = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+        .animation_intent = 0,
+        .animation_duration_ms = 0,
+        .animation_easing = 0,
     };
 };
 
@@ -800,6 +806,12 @@ fn handleRequest(
                 .width = @intCast(args.max_width),
                 .height = @intCast(args.max_height),
             };
+        },
+        .set_animation_intent => |args| {
+            if (!server.wm.ensureWindowing()) return;
+            rendering_requested.animation_intent = @intCast(@intFromEnum(args.intent));
+            rendering_requested.animation_duration_ms = @intCast(args.duration_ms);
+            rendering_requested.animation_easing = @intCast(@intFromEnum(args.easing));
         },
     }
 }
