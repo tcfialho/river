@@ -319,7 +319,7 @@
     </request>
   </interface>
 
-  <interface name="river_window_v1" version="5">
+  <interface name="river_window_v1" version="6">
     <description summary="a logical window">
       This represents a logical window. For example, a window may correspond to
       an xdg_toplevel or Xwayland window.

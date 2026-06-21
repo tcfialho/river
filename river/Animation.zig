@@ -148,6 +148,12 @@ last_fy: f32,
 /// must clamp the revealed width to the committed buffer to avoid a blank strip.
 clip_reveal: bool = false,
 preserve_scale_xy: bool = false,
+/// True for the group-open ENTRANCE slide (armSlide on a live window). The
+/// window enters from off-slot and glides to its target; a resize/move arriving
+/// mid-glide (the client committing its real buffer) must NOT clobber this with a
+/// no-op armMove(start=target), or the entrance never plays. The driver lets it
+/// run to completion. Distinct from a plain reflow move (which has this false).
+is_entrance_slide: bool = false,
 
 /// Fold a monotonic timespec into nanoseconds for trivial subtraction.
 pub fn nowNs() i64 {
@@ -288,6 +294,41 @@ pub fn armFade(
 /// True if this animation changes scale at all (so the driver should apply it).
 pub fn scales(anim: Animation) bool {
     return anim.start_scale != anim.target_scale or anim.last_scale != 1.0;
+}
+
+/// Arm a solid horizontal slide from `(x, y)` to `(x + dx, y)`: position only,
+/// opacity fixed at 1.0 and scale fixed at 1.0 (no fade, no shrink). Used for the
+/// P17 directional closes (deck slides right, main slides left) on the orphan
+/// snapshot, and reused conceptually by the group open slide-in on the live node.
+/// The window appears to slide off as a solid panel — the opposite of the center
+/// fade. `dx` is a logical-pixel delta (typically ± the window width).
+pub fn armSlide(x: i32, y: i32, dx: f32, duration_ms: u32, easing: Easing) Animation {
+    const fx: f32 = @floatFromInt(x);
+    const fy: f32 = @floatFromInt(y);
+    return .{
+        .kind = .move,
+        .easing = easing,
+        .start_ns = nowNs(),
+        .duration_ns = @as(i64, duration_ms) * std.time.ns_per_ms,
+        .start_x = fx,
+        .start_y = fy,
+        .target_x = fx + dx,
+        .target_y = fy,
+        .last_x = fx,
+        .last_y = fy,
+        .nudge_dx = 0,
+        // Solid slide: opacity and scale are held constant (no fade/pop).
+        .start_opacity = 1.0,
+        .target_opacity = 1.0,
+        .last_opacity = 1.0,
+        .start_scale = 1.0,
+        .target_scale = 1.0,
+        .last_scale = 1.0,
+        .start_fx = 1.0,
+        .start_fy = 1.0,
+        .last_fx = 1.0,
+        .last_fy = 1.0,
+    };
 }
 
 /// Arm a focus nudge: a brief lateral bump of `peak_dx` px around the resting
@@ -561,10 +602,18 @@ fn copyBufferIter(buffer: *wlr.SceneBuffer, sx: c_int, sy: c_int, ctx: *CopyCtx)
     sb.setTransform(buffer.transform);
 }
 
+/// How a closing window should leave: the P17 close matrix.
+///   - fade: solo close — fade out + shrink to `to_scale` around center (no move).
+///   - slide_right: deck close — slide one full width to the RIGHT, opacity 1,
+///     no shrink (a solid carousel exit; mirror of the group open slide-in).
+///   - slide_left: main-with-deck close — slide one full width to the LEFT,
+///     opacity 1, no shrink.
+pub const CloseStyle = enum { fade, slide_right, slide_left };
+
 /// Snapshot the buffers under `src_node` into a standalone tree placed at (x,y)
-/// in the wm layer, and start a fade-out + shrink (scale 1 -> `to_scale`) around
-/// the window center (nat_w, nat_h). No-op if there are no buffers or on
-/// allocation failure (the window just disappears, as before).
+/// in the wm layer, and start the close transition selected by `style` (see
+/// CloseStyle). No-op if there are no buffers or on allocation failure (the
+/// window just disappears, as before).
 pub fn spawnClose(
     src_node: *wlr.SceneNode,
     x: i32,
@@ -573,6 +622,8 @@ pub fn spawnClose(
     nat_h: i32,
     to_scale: f32,
     duration_ms: u32,
+    style: CloseStyle,
+    easing: Easing,
 ) void {
     ensureOrphanList();
 
@@ -594,11 +645,26 @@ pub fn spawnClose(
         tree.node.destroy();
         return;
     };
+
+    // P17 close matrix: solo fades+shrinks in place; deck/main slide one full
+    // width sideways at full opacity (solid), no shrink. The slide target is a
+    // horizontal delta from the captured origin; sample() interpolates x toward
+    // it and advanceOrphans applies the sampled x.
+    const slide_dx: f32 = switch (style) {
+        .fade => 0,
+        .slide_right => @floatFromInt(nat_w),
+        .slide_left => @floatFromInt(-nat_w),
+    };
+    const anim: Animation = switch (style) {
+        // Fade 1 -> 0 and shrink 1 -> to_scale at the captured position.
+        .fade => armFade(.close, x, y, 1.0, 0.0, 1.0, to_scale, duration_ms, easing),
+        // Slide: opacity fixed 1, scale fixed 1, x: 0 -> slide_dx (from origin).
+        .slide_right, .slide_left => armSlide(x, y, slide_dx, duration_ms, easing),
+    };
     orphan.* = .{
         .link = undefined,
         .tree = tree,
-        // Fade 1 -> 0 and shrink 1 -> to_scale at the captured position.
-        .anim = armFade(.close, x, y, 1.0, 0.0, 1.0, to_scale, duration_ms, .ease_in),
+        .anim = anim,
         .x = x,
         .y = y,
         .nat_w = nat_w,
@@ -633,9 +699,12 @@ pub fn advanceOrphans(now_ns: i64) bool {
         }
         const s = orphan.anim.sample(now_ns);
         applyOpacity(&orphan.tree.node, s.opacity);
-        // Shrink around center: scale the buffer and offset the tree to recenter.
+        // Shrink around center (solo fade only): scale the buffer and recenter.
+        // For a slide, scale is 1.0 so applyScale is a no-op (r.dx = 0). The
+        // sampled x/y carry the slide (start -> start+dx); the fade close keeps
+        // s.x == orphan.x (armFade fixes target_x = x), so this also covers it.
         const r = applyScale(&orphan.tree.node, s.scale, orphan.nat_w, orphan.nat_h);
-        orphan.tree.node.setPosition(orphan.x + r.dx, orphan.y + r.dy);
+        orphan.tree.node.setPosition(s.x + r.dx, s.y + r.dy);
         any_active = true;
     }
     return any_active;
