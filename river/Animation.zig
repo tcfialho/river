@@ -147,6 +147,7 @@ last_fy: f32,
 /// space). The driver (Output.advanceAnimations) applies/clears the clip and
 /// must clamp the revealed width to the committed buffer to avoid a blank strip.
 clip_reveal: bool = false,
+preserve_scale_xy: bool = false,
 
 /// Fold a monotonic timespec into nanoseconds for trivial subtraction.
 pub fn nowNs() i64 {
@@ -184,6 +185,7 @@ pub fn armMove(
     var target_scale: f32 = 1.0;
     var sfx: f32 = start_fx;
     var sfy: f32 = start_fy;
+    var preserve_scale_xy = false;
     if (existing) |a| {
         sx = a.last_x;
         sy = a.last_y;
@@ -200,6 +202,7 @@ pub fn armMove(
             sfx = a.last_fx;
             sfy = a.last_fy;
         }
+        preserve_scale_xy = a.preserve_scale_xy;
     }
 
     return .{
@@ -224,6 +227,7 @@ pub fn armMove(
         .start_fy = sfy,
         .last_fx = sfx,
         .last_fy = sfy,
+        .preserve_scale_xy = preserve_scale_xy,
     };
 }
 

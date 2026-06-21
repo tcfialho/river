@@ -1086,10 +1086,17 @@ pub fn renderFinish(window: *Window) void {
         // Fail-safe vs the swap overlap regression: that needed TWO windows
         // crossing the screen center, impossible with one visible window.
         var sfx: f32 = 1.0;
-        const sfy: f32 = 1.0;
+        var sfy: f32 = 1.0;
         var clip_reveal = false;
         const grew = window.box.width > old_w;
-        if (grew and old_w > 0 and visibleManagedCount() == 1) {
+        const AnimationIntent = @import("AnimationIntent.zig");
+        const intent: AnimationIntent.Intent = @enumFromInt(window.rendering_requested.animation_intent);
+        const is_fade_open_or_unminimize = (intent == .fade_open or intent == .unminimize);
+        const preserve = (window.anim != null and is_fade_open_or_unminimize and resized);
+        if (preserve) {
+            sfx = @as(f32, @floatFromInt(old_w)) / @as(f32, @floatFromInt(window.box.width));
+            sfy = @as(f32, @floatFromInt(old_h)) / @as(f32, @floatFromInt(window.box.height));
+        } else if (grew and old_w > 0 and visibleManagedCount() == 1) {
             sfx = @as(f32, @floatFromInt(old_w)) / @as(f32, @floatFromInt(window.box.width));
             clip_reveal = true;
         }
@@ -1110,6 +1117,9 @@ pub fn renderFinish(window: *Window) void {
             ease,
         );
         window.anim.?.clip_reveal = clip_reveal;
+        if (preserve) {
+            window.anim.?.preserve_scale_xy = true;
+        }
         if (clip_reveal) {
             window.anim.?.delay_ns = @as(i64, grow_reveal_delay_ms) * std.time.ns_per_ms;
         }
