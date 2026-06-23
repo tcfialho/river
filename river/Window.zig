@@ -1066,9 +1066,9 @@ pub fn renderFinish(window: *Window) void {
         (early_intent == .slide_deck_out or early_intent == .slide_deck_out_left))
     {
         const dx: f32 = if (early_intent == .slide_deck_out_left)
-            -@as(f32, @floatFromInt(old_w)) * 0.15
+            -@as(f32, @floatFromInt(old_w)) * 0.05
         else
-            @as(f32, @floatFromInt(old_w)) * 0.15;
+            @as(f32, @floatFromInt(old_w)) * 0.05;
         Animation.spawnDeckOut(
             &window.surfaces.tree.node,
             old_x,
@@ -1076,7 +1076,7 @@ pub fn renderFinish(window: *Window) void {
             old_w,
             old_h,
             dx,
-            130,
+            100,
             .ease_in,
         );
         log.info("[ANIM-DIAG]   -> spawned DECK-OUT orphan (slide+fade, dx={d:.2})", .{dx});

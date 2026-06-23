@@ -619,7 +619,7 @@ pub fn sample(anim: *Animation, now_ns: i64) Sample {
         0;
     const x = anim.start_x + (anim.target_x - anim.start_x) * p + bump;
     const y = anim.start_y + (anim.target_y - anim.start_y) * p;
-    const op_factor = if (anim.fade_fast) @sqrt(p) else p;
+    const op_factor = if (anim.fade_fast) @sqrt(@sqrt(p)) else p;
     const o = anim.start_opacity + (anim.target_opacity - anim.start_opacity) * op_factor;
     const sc = anim.start_scale + (anim.target_scale - anim.start_scale) * p;
     // Size tween always lands on 1.0 (natural footprint).
