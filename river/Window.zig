@@ -29,12 +29,12 @@ const XwaylandWindow = @import("XwaylandWindow.zig");
 
 const log = std.log.scoped(.wm);
 
-/// MainDeck animation durations (milliseconds). See docs/prototype-anim-p15.html.
-/// Geometry moves use the P15 spring over 0.28s (swap / group grow-shrink); per-
-/// action tuning (quick focus nudge vs. spring) is a Tier 2 refinement.
-const move_anim_ms: u32 = 280;
+/// MainDeck animation durations (milliseconds). See docs/prototype-anim-p17.html.
+/// Geometry moves (reflow: maximize/restore/promote/send/swap) use CSS ease-in-out
+/// over 0.20s, matching the prototype's `left/top/width/height 0.20s ease-in-out`.
+const move_anim_ms: u32 = 200;
 const open_anim_ms: u32 = 220;
-const close_anim_ms: u32 = 180; // 10% faster than the old 200 (user request)
+const close_anim_ms: u32 = 200; // P17 solo/main/deck close: 0.20s ease-in
 /// P17 directional close slide (deck-out right / main-close left): 200ms.
 const slide_close_ms: u32 = 200;
 /// Lone-window grow reveal: OVERLAPS the tail of the close fade for fluidity —
@@ -60,10 +60,9 @@ fn animationEasingFromProtocol(value: u32, default: Animation.Easing) Animation.
     return switch (value) {
         0x1 => .ease_in,
         0x2 => .ease_out,
+        0x3 => .ease_in_out, // CSS cubic-bezier(0.42,0,0.58,1), bit-exact (P17 reflow)
         0x4 => .spring, // cubic_spring(0.22,1,0.36,1)
-        // 0x0 linear and 0x3 ease_in_out have no distinct local curve yet;
-        // ease_in_out is closest to ease_out for these short transitions.
-        0x3 => .ease_out,
+        // 0x0 linear has no distinct local curve yet; falls back to `default`.
         else => default,
     };
 }

@@ -51,6 +51,11 @@ pub const Easing = enum {
     /// overshoot/bounce despite the name; the control points pull hard toward 1
     /// early). Used for geometry transitions (swap, group grow/shrink).
     spring,
+    /// CSS ease-in-out: cubic-bezier(0.42, 0, 0.58, 1) — symmetric S-curve.
+    /// Matches the prototype's geometry transition (`left/top/width/height 0.20s
+    /// ease-in-out`) bit-for-bit. Used for the MainDeck reflow (maximize, restore,
+    /// promote, send-to-bottom, swap).
+    ease_in_out,
 
     /// Map normalized time t in [0,1] to eased progress in [0,1].
     fn apply(easing: Easing, t: f32) f32 {
@@ -60,14 +65,16 @@ pub const Easing = enum {
             .ease_out => 1.0 - (1.0 - t) * (1.0 - t),
             // Quadratic ease-in: gentle start, fast stop.
             .ease_in => t * t,
-            .spring => cubicBezierYForX(t),
+            .spring => cubicBezierYForX(t, 0.22, 1.0, 0.36, 1.0),
+            .ease_in_out => cubicBezierYForX(t, 0.42, 0.0, 0.58, 1.0),
         };
     }
 };
 
-// cubic-bezier(0.22, 1, 0.36, 1): control points P1=(0.22,1), P2=(0.36,1),
-// with the implicit P0=(0,0), P3=(1,1). For a given x (= normalized time t),
-// solve x(u)=t for the bezier parameter u, then evaluate y(u). Dependency-free.
+// Generic cubic-bezier(p1x, p1y, p2x, p2y) with implicit P0=(0,0), P3=(1,1).
+// For a given x (= normalized time t), solve x(u)=t for the bezier parameter u,
+// then evaluate y(u). Dependency-free. Two curves use this: the spring
+// (0.22,1,0.36,1) and the CSS ease-in-out (0.42,0,0.58,1).
 //
 // Root finding is Newton-Raphson (WebKit UnitBezier approach): x(u) is monotonic
 // on [0,1] (both control x-coords are in [0,1]) and well-behaved, so Newton
@@ -75,10 +82,6 @@ pub const Easing = enum {
 // where Newton leaves [0,1] or the derivative is ~0 (flat region). This finds the
 // SAME root the old 24-step pure bisection did — the curve, and thus the
 // animation feel, is unchanged; only the iteration count drops.
-const bez_p1x: f32 = 0.22;
-const bez_p1y: f32 = 1.0;
-const bez_p2x: f32 = 0.36;
-const bez_p2y: f32 = 1.0;
 
 fn bezierAxis(u: f32, c1: f32, c2: f32) f32 {
     const v = 1.0 - u;
@@ -95,13 +98,13 @@ fn bezierAxisDeriv(u: f32, c1: f32, c2: f32) f32 {
 
 /// Solve bezierAxis(u) = x for u in [0,1]. Newton-Raphson with a bisection
 /// fallback; converges to the same root as a full bisection sweep.
-fn solveBezierU(x: f32) f32 {
+fn solveBezierU(x: f32, p1x: f32, p2x: f32) f32 {
     var u: f32 = x; // u0 = x is an excellent seed for a near-diagonal x-curve.
     var i: u32 = 0;
     while (i < 8) : (i += 1) {
-        const xu = bezierAxis(u, bez_p1x, bez_p2x) - x;
+        const xu = bezierAxis(u, p1x, p2x) - x;
         if (@abs(xu) < 1e-5) return u;
-        const d = bezierAxisDeriv(u, bez_p1x, bez_p2x);
+        const d = bezierAxisDeriv(u, p1x, p2x);
         if (@abs(d) < 1e-6) break; // derivative too small: hand off to bisection.
         u -= xu / d;
         if (u < 0.0 or u > 1.0) break; // left the domain: hand off to bisection.
@@ -113,17 +116,20 @@ fn solveBezierU(x: f32) f32 {
     u = x;
     i = 0;
     while (i < 24) : (i += 1) {
-        const xu = bezierAxis(u, bez_p1x, bez_p2x);
+        const xu = bezierAxis(u, p1x, p2x);
         if (xu < x) lo = u else hi = u;
         u = (lo + hi) * 0.5;
     }
     return u;
 }
 
-fn cubicBezierYForX(x: f32) f32 {
+/// Evaluate cubic-bezier(p1x, p1y, p2x, p2y) at x in [0,1] (P0=(0,0), P3=(1,1)).
+/// Used by .spring (0.22,1,0.36,1) and .ease_in_out (0.42,0,0.58,1) — same solver,
+/// different control points, so each curve is bit-exact to its CSS definition.
+fn cubicBezierYForX(x: f32, p1x: f32, p1y: f32, p2x: f32, p2y: f32) f32 {
     if (x <= 0.0) return 0.0;
     if (x >= 1.0) return 1.0;
-    return bezierAxis(solveBezierU(x), bez_p1y, bez_p2y);
+    return bezierAxis(solveBezierU(x, p1x, p2x), p1y, p2y);
 }
 
 kind: Kind,
