@@ -1038,22 +1038,6 @@ fn presentationHint(window: *Window) river.OutputV1.PresentationMode {
     };
 }
 
-/// Count managed windows currently visible in the layout: mapped, not hidden
-/// (so deck-overflow and minimized windows don't count), and top-level (no
-/// parent, so dialogs/children don't count). Used to gate the lone-window grow
-/// reveal. Reads global state, not intent — safe, unlike drag heuristics.
-fn visibleManagedCount() usize {
-    var n: usize = 0;
-    var it = server.wm.windows.iterator();
-    while (it.next()) |w| {
-        if (w.state == .mapped and !w.rendering_requested.hidden and w.getParent() == null) {
-            n += 1;
-        }
-    }
-    return n;
-}
-
-/// The smallest box.x among the OTHER visible managed windows (excluding `self`).
 pub fn renderFinish(window: *Window) void {
     const requested = &window.rendering_requested;
 
@@ -1306,62 +1290,47 @@ pub fn renderFinish(window: *Window) void {
         // already where the slide is heading). Let the slide finish; the frame
         // loop's "else if (window.anim != null)" branch keeps it running.
         //
-        // DECLARATIVE DISPATCH (P-refactor): the tween TYPE is chosen by the WM's
-        // intent for this transition, not inferred from the geometry delta. This
-        // fixes the invisible deck-switch: a window entering the deck slot already
-        // has anim_positioned=true (it was only hidden), so first_show is false and
-        // it used to fall through to armMove (spring) — no visible slide. Now a
-        // slide_in intent arms armSlide here too, exactly like the first_show path.
-        if (open_intent == .slide_in) {
-            const dx: f32 = @as(f32, @floatFromInt(window.box.width)) * slide_in_frac;
-            const start_x: i32 = window.box.x - @as(i32, @intFromFloat(@round(dx)));
-            const dur: u32 = if (window.rendering_requested.animation_duration_ms != 0)
-                window.rendering_requested.animation_duration_ms
-            else
-                open_anim_ms;
-            const easing = animationEasingFromProtocol(window.rendering_requested.animation_easing, .ease_out);
-            window.anim = Animation.armSlide(start_x, window.box.y, dx, dur, easing);
-            window.anim.?.is_entrance_slide = true;
-            window.tree.node.setPosition(start_x, window.box.y);
-            window.popup_tree.node.setPosition(start_x, window.box.y);
-            Animation.scheduleAllOutputFrames();
-            log.info("[ANIM-DIAG]   -> armed SLIDE (move-branch slide_in)", .{});
-            window.rendering_requested.animation_intent = 0;
-            window.rendering_requested.animation_duration_ms = 0;
-            window.rendering_requested.animation_easing = 0;
-        } else {
-        // Position tween by default. We deliberately do NOT scale the live client
-        // surface during a normal resize: setDestSize on the real buffer races
-        // the client's own commits and produced deformed, overlapping windows on
-        // swap. With size ratios 1.0/1.0, resizes()/scales() are false, so
-        // applyScaleXY never runs and the surface keeps river's native auto-size.
+        // DECLARATIVE DISPATCH (P-refactor): the tween TYPE comes from the WM's
+        // intent, NOT inferred from the geometry delta. The `moved or resized`
+        // condition above is only the ENTRY gate ("is there a delta to tween?") —
+        // every action reaching here genuinely moves (swap swaps slots, maximize/
+        // restore/grow resize), so it blocks zero declared intents. Entrances
+        // (hidden->visible, same box) are owned by the branch above; they never
+        // reach here. The `grew && visibleManagedCount()==1` inference is GONE:
+        // grow-reveal is now the WM-declared GROW_REVEAL intent.
         //
-        // EXCEPTION — the lone-window grow REVEAL: when exactly ONE managed
-        // window is visible and it grew (the last deck window closed and main
-        // expands to fill the screen), reveal it via a growing CLIP instead of a
-        // texture scale. The content stays at its final committed size (no
-        // distortion / glitch — unlike the reverted scale version); a clip
-        // rectangle grows left-to-right from the old footprint to full width.
-        // Fail-safe vs the swap overlap regression: that needed TWO windows
-        // crossing the screen center, impossible with one visible window.
+        // We deliberately do NOT scale the live client surface during a normal
+        // resize: setDestSize on the real buffer races the client's own commits
+        // and produced deformed, overlapping windows on swap. With size ratios
+        // 1.0/1.0, resizes()/scales() are false, so applyScaleXY never runs and the
+        // surface keeps river's native auto-size.
         var sfx: f32 = 1.0;
         var sfy: f32 = 1.0;
-        var clip_reveal = false;
-        const grew = window.box.width > old_w;
+        const clip_reveal = (open_intent == .grow_reveal);
+        // GEOMETRY RECONCILIATION (not animation choice) — stays. `preserve` fixes
+        // the case where a fade_open/unminimize is mid-flight and the client
+        // commits its real (larger) buffer: the WM can't declare this (it doesn't
+        // know when the client commits), so it is detected from `resized`. Keep it.
         const is_fade_open_or_unminimize = (open_intent == .fade_open or open_intent == .unminimize);
         const preserve = (window.anim != null and is_fade_open_or_unminimize and resized);
         if (preserve) {
             sfx = @as(f32, @floatFromInt(old_w)) / @as(f32, @floatFromInt(window.box.width));
             sfy = @as(f32, @floatFromInt(old_h)) / @as(f32, @floatFromInt(window.box.height));
-        } else if (grew and old_w > 0 and visibleManagedCount() == 1) {
+        } else if (clip_reveal and old_w > 0) {
+            // Lone-window grow reveal: reveal via a growing clip from the old
+            // footprint to full width (no texture scale → no distortion).
             sfx = @as(f32, @floatFromInt(old_w)) / @as(f32, @floatFromInt(window.box.width));
-            clip_reveal = true;
         }
-        // The grow reveal gets its own longer duration + ease-out (so the growth
-        // reads), and a pre-roll delay so it plays AFTER the close fade. A normal
-        // move keeps the snappy spring with no delay.
-        const dur: u32 = if (clip_reveal) grow_reveal_ms else move_anim_ms;
-        const ease: Animation.Easing = if (clip_reveal) .ease_out else .spring;
+        // Duration/easing from the WM's wire values (the intent carries them);
+        // grow-reveal gets a longer default + a pre-roll delay so it plays AFTER
+        // the close fade. A plain move (swap/reflow) uses the WM easing too.
+        const dur: u32 = if (window.rendering_requested.animation_duration_ms != 0)
+            window.rendering_requested.animation_duration_ms
+        else if (clip_reveal) grow_reveal_ms else move_anim_ms;
+        const ease: Animation.Easing = animationEasingFromProtocol(
+            window.rendering_requested.animation_easing,
+            if (clip_reveal) .ease_out else .spring,
+        );
         window.anim = Animation.armMove(
             window.anim,
             old_x,
@@ -1374,7 +1343,7 @@ pub fn renderFinish(window: *Window) void {
             ease,
         );
         window.anim.?.clip_reveal = clip_reveal;
-        log.info("[ANIM-DIAG]   -> armed MOVE (else: clip_reveal={} ease={s})", .{ clip_reveal, if (clip_reveal) "ease_out" else "spring" });
+        log.info("[ANIM-DIAG]   -> armed MOVE (intent={s} clip_reveal={})", .{ AnimIntent.intentName(open_intent), clip_reveal });
         if (preserve) {
             window.anim.?.preserve_scale_xy = true;
         }
@@ -1390,7 +1359,6 @@ pub fn renderFinish(window: *Window) void {
         window.rendering_requested.animation_intent = 0;
         window.rendering_requested.animation_duration_ms = 0;
         window.rendering_requested.animation_easing = 0;
-        } // end else (non-slide_in move/grow path)
     } else if (focus_gained and window.anim == null and can_move_anim) {
         // Pure focus change (no geometry change, nothing else animating): a brief
         // lateral nudge on the window that just gained focus. Direction: toward
