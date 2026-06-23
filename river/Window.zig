@@ -1065,7 +1065,10 @@ pub fn renderFinish(window: *Window) void {
         window.wm_requested.fullscreen == null and
         (early_intent == .slide_deck_out or early_intent == .slide_deck_out_left))
     {
-        const dx: f32 = if (early_intent == .slide_deck_out_left) -28.0 else 28.0;
+        const dx: f32 = if (early_intent == .slide_deck_out_left)
+            -@as(f32, @floatFromInt(old_w)) * 0.15
+        else
+            @as(f32, @floatFromInt(old_w)) * 0.15;
         Animation.spawnDeckOut(
             &window.surfaces.tree.node,
             old_x,
@@ -1076,7 +1079,7 @@ pub fn renderFinish(window: *Window) void {
             130,
             .ease_in,
         );
-        log.info("[ANIM-DIAG]   -> spawned DECK-OUT orphan (slide+fade, dx={d})", .{dx});
+        log.info("[ANIM-DIAG]   -> spawned DECK-OUT orphan (slide+fade, dx={d:.2})", .{dx});
         // The intent is consumed by the orphan; clear so it does not leak.
         window.rendering_requested.animation_intent = 0;
         window.rendering_requested.animation_duration_ms = 0;
@@ -1240,9 +1243,9 @@ pub fn renderFinish(window: *Window) void {
         // Honour the intent explicitly. The intent carries the FULL semantics —
         // direction comes from the ENUM, never from geometry (no box.x sniffing):
         //   - deck_in_right (DECK_PREV, Win+←): deck-switch IN from the RIGHT.
-        //     +28px slide + fade-in + traveling clip (P2.3 p9DeckInRight).
+        //     proportional slide + fade-in (no traveling clip, matching P2.3 p9DeckInRight).
         //   - deck_in_left (DECK_NEXT, Win+→): deck-switch IN from the LEFT.
-        //     -28px slide + fade-in + traveling clip (p9DeckInLeft). The clip pins
+        //     proportional slide + fade-in + traveling clip (p9DeckInLeft). The clip pins
         //     the visible left border at the main<->deck division so the window
         //     does not appear to cross over the main slot.
         //   - slide_in: group-open entrance (becomes main). -45% width solid slide
@@ -1253,17 +1256,21 @@ pub fn renderFinish(window: *Window) void {
             open_anim_ms;
         const easing = animationEasingFromProtocol(window.rendering_requested.animation_easing, .ease_out);
         if (open_intent == .deck_in_right) {
-            // Deck-switch IN from the right (+28px) + fade + traveling clip.
-            window.anim = Animation.armDeckIn(window.box.x, window.box.y, 28.0, 200, .ease_out);
-            window.tree.node.setPosition(window.box.x + 28, window.box.y);
-            window.popup_tree.node.setPosition(window.box.x + 28, window.box.y);
-            log.info("[ANIM-DIAG]   -> armed DECK-IN right (slide+fade+clip, dx=+28)", .{});
+            // Deck-switch IN from the right + fade + traveling clip (no clip for right entering).
+            const dx: f32 = @as(f32, @floatFromInt(window.box.width)) * 0.30;
+            const dx_i: i32 = @intFromFloat(@round(dx));
+            window.anim = Animation.armDeckIn(window.box.x, window.box.y, dx, 200, .ease_out);
+            window.tree.node.setPosition(window.box.x + dx_i, window.box.y);
+            window.popup_tree.node.setPosition(window.box.x + dx_i, window.box.y);
+            log.info("[ANIM-DIAG]   -> armed DECK-IN right (slide+fade, dx={d:.2})", .{dx});
         } else if (open_intent == .deck_in_left) {
-            // Deck-switch IN from the left (-28px) + fade + traveling clip.
-            window.anim = Animation.armDeckIn(window.box.x, window.box.y, -28.0, 200, .ease_out);
-            window.tree.node.setPosition(window.box.x - 28, window.box.y);
-            window.popup_tree.node.setPosition(window.box.x - 28, window.box.y);
-            log.info("[ANIM-DIAG]   -> armed DECK-IN left (slide+fade+clip, dx=-28)", .{});
+            // Deck-switch IN from the left - fade + traveling clip.
+            const dx: f32 = -@as(f32, @floatFromInt(window.box.width)) * 0.30;
+            const dx_i: i32 = @intFromFloat(@round(dx));
+            window.anim = Animation.armDeckIn(window.box.x, window.box.y, dx, 200, .ease_out);
+            window.tree.node.setPosition(window.box.x + dx_i, window.box.y);
+            window.popup_tree.node.setPosition(window.box.x + dx_i, window.box.y);
+            log.info("[ANIM-DIAG]   -> armed DECK-IN left (slide+fade+clip, dx={d:.2})", .{dx});
         } else {
             // slide_in: group-open entrance. -45% solid slide, no clip.
             const dx: f32 = @as(f32, @floatFromInt(window.box.width)) * slide_in_frac;

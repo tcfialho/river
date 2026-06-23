@@ -660,9 +660,7 @@ pub fn advanceAnimations(now_ns: i64) bool {
                 const clip_x_f: f32 = anim.clip_travel_x * (1.0 - p);
                 const clip_x: i32 = @intFromFloat(@round(clip_x_f));
                 const clip: wlr.Box = .{ .x = clip_x, .y = 0, .width = window.box.width, .height = window.box.height };
-                if (!window.surfaces.tree.children.empty()) {
-                    window.surfaces.tree.node.subsurfaceTreeSetClip(&clip);
-                }
+                window.surfaces.tree.node.subsurfaceTreeSetClip(&clip);
             }
         }
 

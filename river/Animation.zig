@@ -213,6 +213,7 @@ scale_origin_bottom: bool = false,
 /// round(clip_travel_x * (1-progress)). 0 / false = no traveling clip.
 clip_travel: bool = false,
 clip_travel_x: f32 = 0,
+fade_fast: bool = false,
 
 /// Fold a monotonic timespec into nanoseconds for trivial subtraction.
 pub fn nowNs() i64 {
@@ -508,6 +509,9 @@ pub fn armDeckOut(x: i32, y: i32, dx: f32, duration_ms: u32, easing: Easing) Ani
         .start_fy = 1.0,
         .last_fx = 1.0,
         .last_fy = 1.0,
+        .clip_travel = false,
+        .clip_travel_x = 0.0,
+        .fade_fast = true,
     };
 }
 
@@ -543,8 +547,8 @@ pub fn armDeckIn(x: i32, y: i32, dx: f32, duration_ms: u32, easing: Easing) Anim
         .start_fy = 1.0,
         .last_fx = 1.0,
         .last_fy = 1.0,
-        .clip_travel = true,
-        .clip_travel_x = @abs(dx),
+        .clip_travel = (dx < 0.0),
+        .clip_travel_x = if (dx < 0.0) @abs(dx) else 0.0,
     };
 }
 
@@ -615,7 +619,8 @@ pub fn sample(anim: *Animation, now_ns: i64) Sample {
         0;
     const x = anim.start_x + (anim.target_x - anim.start_x) * p + bump;
     const y = anim.start_y + (anim.target_y - anim.start_y) * p;
-    const o = anim.start_opacity + (anim.target_opacity - anim.start_opacity) * p;
+    const op_factor = if (anim.fade_fast) @sqrt(p) else p;
+    const o = anim.start_opacity + (anim.target_opacity - anim.start_opacity) * op_factor;
     const sc = anim.start_scale + (anim.target_scale - anim.start_scale) * p;
     // Size tween always lands on 1.0 (natural footprint).
     const sfx = anim.start_fx + (1.0 - anim.start_fx) * p;
