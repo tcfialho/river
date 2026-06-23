@@ -55,6 +55,13 @@ pub const Intent = enum(u32) {
     /// Win+→; slide_in is now reserved ONLY for the group-open entrance (becomes
     /// main), so the river no longer needs box.x to disambiguate.
     deck_in_left = 0xe,
+
+    /// Lone-window grow reveal: the sole survivor of a close (the last deck window
+    /// closed, main expands to fill the screen) is revealed via a growing CLIP
+    /// from its old footprint to full width, with a pre-roll delay so it plays
+    /// after the close fade. The WM declares this (it knows a window left and only
+    /// one visible remains) so the river no longer infers it from grew && count==1.
+    grow_reveal = 0xf,
 };
 
 /// Easing function selector
@@ -235,6 +242,16 @@ pub fn configForIntent(intent: Intent) Config {
             .use_clip_reveal = true,
             .scale_origin = .center,
         },
+        .grow_reveal => .{
+            .duration_ms = 240,
+            .easing = .ease_out,
+            .animate_opacity = false,
+            .animate_scale = false,
+            .animate_position = true,
+            .animate_size = true,
+            .use_clip_reveal = true,
+            .scale_origin = .center,
+        },
     };
 }
 
@@ -276,6 +293,7 @@ pub fn intentName(intent: Intent) []const u8 {
         .slide_deck_out_left => "SLIDE_DECK_OUT_LEFT",
         .deck_in_right => "DECK_IN_RIGHT",
         .deck_in_left => "DECK_IN_LEFT",
+        .grow_reveal => "GROW_REVEAL",
     };
 }
 

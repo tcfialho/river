@@ -1157,6 +1157,7 @@
       <entry name="slide_deck_out_left" value="0xc" summary="deck out left (PREV): slide left"/>
       <entry name="deck_in_right" value="0xd" summary="deck in right (PREV): slide in right"/>
       <entry name="deck_in_left" value="0xe" summary="deck in left (NEXT): slide in left + clip"/>
+      <entry name="grow_reveal" value="0xf" summary="lone survivor of a close grows to fill (clip reveal)"/>
     </enum>
 
     <enum name="animation_easing">
