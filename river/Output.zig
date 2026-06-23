@@ -638,6 +638,32 @@ pub fn advanceAnimations(now_ns: i64) bool {
             const r = Animation.applyScaleXY(&window.surfaces.tree.node, fx, fy, window.box.width, window.box.height);
             off_x = r.dx;
             off_y = r.dy;
+            // Minimize/unminimize: scale origin at the BOTTOM center, not the
+            // center. applyScaleXY recentered around center (dy = (1-fy)*h/2);
+            // override to (1-fy)*h so the window shrinks toward its bottom edge
+            // (toward the taskbar) and grows back up from it. P10 origin.
+            if (anim.scale_origin_bottom and !finished) {
+                const h_f: f32 = @floatFromInt(window.box.height);
+                off_y = @intFromFloat(@round((1.0 - fy) * h_f));
+            }
+        }
+
+        // Deck-switch IN traveling clip (P2.3 p9DeckInLeft/Right): pin the visible
+        // left border at the main<->deck division while the window glides in, so it
+        // does not appear to cross over the main slot. The clip left edge travels
+        // from clip_travel_x (at progress 0) to 0 (at progress 1). Cleared on finish.
+        if (anim.clip_travel) {
+            if (finished) {
+                Animation.clearClipReveal(window.surfaces.tree);
+            } else {
+                const p = anim.progress(now_ns);
+                const clip_x_f: f32 = anim.clip_travel_x * (1.0 - p);
+                const clip_x: i32 = @intFromFloat(@round(clip_x_f));
+                const clip: wlr.Box = .{ .x = clip_x, .y = 0, .width = window.box.width, .height = window.box.height };
+                if (!window.surfaces.tree.children.empty()) {
+                    window.surfaces.tree.node.subsurfaceTreeSetClip(&clip);
+                }
+            }
         }
 
         window.tree.node.setPosition(base_x + off_x, base_y + off_y);

@@ -40,6 +40,21 @@ pub const Intent = enum(u32) {
 
     /// Unminimize: translateY -60px, scale 0.55→1, opacity fade up
     unminimize = 0xb,
+
+    /// Deck-switch OUT to the LEFT (DECK_PREV): the leaving window slides left
+    /// +fade out. Mirror of slide_deck_out (which exits right for DECK_NEXT).
+    slide_deck_out_left = 0xc,
+
+    /// Deck-switch IN from the RIGHT (DECK_PREV): the entering window slides in
+    /// from the right +fade in +traveling clip. Mirror of slide_in's deck variant
+    /// (which enters from the left for DECK_NEXT).
+    deck_in_right = 0xd,
+
+    /// Deck-switch IN from the LEFT (DECK_NEXT): the entering window slides in
+    /// from the left +fade in +traveling clip. This is the deck-slot entrance for
+    /// Win+→; slide_in is now reserved ONLY for the group-open entrance (becomes
+    /// main), so the river no longer needs box.x to disambiguate.
+    deck_in_left = 0xe,
 };
 
 /// Easing function selector
@@ -190,6 +205,36 @@ pub fn configForIntent(intent: Intent) Config {
             .use_clip_reveal = false,
             .scale_origin = .bottom_center,
         },
+        .slide_deck_out_left => .{
+            .duration_ms = 130,
+            .easing = .ease_in,
+            .animate_opacity = true,
+            .animate_scale = false,
+            .animate_position = true,
+            .animate_size = false,
+            .use_clip_reveal = false,
+            .scale_origin = .center,
+        },
+        .deck_in_right => .{
+            .duration_ms = 200,
+            .easing = .ease_out,
+            .animate_opacity = true,
+            .animate_scale = false,
+            .animate_position = true,
+            .animate_size = false,
+            .use_clip_reveal = true,
+            .scale_origin = .center,
+        },
+        .deck_in_left => .{
+            .duration_ms = 200,
+            .easing = .ease_out,
+            .animate_opacity = true,
+            .animate_scale = false,
+            .animate_position = true,
+            .animate_size = false,
+            .use_clip_reveal = true,
+            .scale_origin = .center,
+        },
     };
 }
 
@@ -228,6 +273,9 @@ pub fn intentName(intent: Intent) []const u8 {
         .fs_carousel => "FS_CAROUSEL",
         .minimize => "MINIMIZE",
         .unminimize => "UNMINIMIZE",
+        .slide_deck_out_left => "SLIDE_DECK_OUT_LEFT",
+        .deck_in_right => "DECK_IN_RIGHT",
+        .deck_in_left => "DECK_IN_LEFT",
     };
 }
 

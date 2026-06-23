@@ -34,7 +34,7 @@
     document are to be interpreted as described in IETF RFC 2119.
   </description>
 
-  <interface name="river_window_manager_v1" version="6">
+  <interface name="river_window_manager_v1" version="7">
     <description summary="window manager global interface">
       This global interface should only be advertised to the window manager
       process. Only one window management client may be active at a time. The
@@ -319,7 +319,7 @@
     </request>
   </interface>
 
-  <interface name="river_window_v1" version="6">
+  <interface name="river_window_v1" version="7">
     <description summary="a logical window">
       This represents a logical window. For example, a window may correspond to
       an xdg_toplevel or Xwayland window.
@@ -1154,6 +1154,9 @@
       <entry name="fs_carousel" value="0x9" summary="fullscreen carousel switch"/>
       <entry name="minimize" value="0xa" summary="minimize: scale fade down"/>
       <entry name="unminimize" value="0xb" summary="unminimize: scale fade up"/>
+      <entry name="slide_deck_out_left" value="0xc" summary="deck out left (PREV): slide left"/>
+      <entry name="deck_in_right" value="0xd" summary="deck in right (PREV): slide in right"/>
+      <entry name="deck_in_left" value="0xe" summary="deck in left (NEXT): slide in left + clip"/>
     </enum>
 
     <enum name="animation_easing">
@@ -1187,6 +1190,32 @@
       <arg name="intent" type="uint" enum="animation_intent" summary="animation intent"/>
       <arg name="duration_ms" type="uint" summary="duration in milliseconds, 0 for default"/>
       <arg name="easing" type="uint" enum="animation_easing" summary="easing function, 0 for default"/>
+    </request>
+
+    <request name="set_close_intent" since="7">
+      <description summary="pre-register the close animation for this window">
+        Declare, ahead of time, which animation the compositor must play if this
+        window closes. Unlike set_animation_intent (which describes the CURRENT
+        state change and is consumed at the next render_finish), the close intent
+        is STICKY per-window state: it persists until changed, and the compositor
+        reads it at unmap time.
+
+        This exists because a client-initiated close (the app destroys its own
+        toplevel) is unmapped and snapshotted by the compositor synchronously,
+        before the river_window_v1.closed event reaches the WM — so the WM cannot
+        send a close animation in reaction to the close. By pre-registering the
+        intent on every render where the window's role (deck / main / solo) is
+        known, the compositor always has a fresh, explicit value to play and never
+        has to infer the close direction from geometry.
+
+        Only the close-family intents are meaningful here: fade_close (solo),
+        slide_close (main with a deck, slides left), slide_deck_out (deck, slides
+        right). Other values are treated as fade_close.
+
+        This request modifies rendering state and may only be made as part of
+        a manage or render sequence, see the river_window_manager_v1 description.
+      </description>
+      <arg name="intent" type="uint" enum="animation_intent" summary="close animation intent"/>
     </request>
   </interface>
 

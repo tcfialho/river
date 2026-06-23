@@ -193,6 +193,21 @@ preserve_scale_xy: bool = false,
 /// run to completion. Distinct from a plain reflow move (which has this false).
 is_entrance_slide: bool = false,
 
+/// Scale origin: true = bottom-center (minimize/unminimize), false = center
+/// (default, all other scale pops). When true, the driver's recenter offset Y
+/// is (1-fy)*h instead of (1-fy)*h/2, so the window shrinks toward its bottom
+/// edge (toward the taskbar) and grows back up from it. X stays centered.
+/// P10 p10Minimize/p10Unminimize use transform-origin: bottom center.
+scale_origin_bottom: bool = false,
+
+/// Deck-switch clip-que-viaja (P2.3 p9DeckInLeft/Right): the clip's left edge
+/// starts at clip_travel_x px and moves to 0 as the slide reaches its target,
+/// so the visible left border stays pinned at the main<->deck division while the
+/// window glides in. The driver applies subsurfaceTreeSetClip with x =
+/// round(clip_travel_x * (1-progress)). 0 / false = no traveling clip.
+clip_travel: bool = false,
+clip_travel_x: f32 = 0,
+
 /// Fold a monotonic timespec into nanoseconds for trivial subtraction.
 pub fn nowNs() i64 {
     const ts = util.timestamp();
@@ -369,6 +384,164 @@ pub fn armSlide(x: i32, y: i32, dx: f32, duration_ms: u32, easing: Easing) Anima
     };
 }
 
+/// Arm a minimize: slide DOWN by `dy` px + shrink from `from_scale` to
+/// `to_scale` + fade from `from_op` to `to_op`, with scale origin at the
+/// BOTTOM center (P10 p10Minimize: translateY 0->60, scale 1->0.55, opacity
+/// 1->0, 200ms ease-in, transform-origin: bottom center).
+pub fn armMinimize(
+    x: i32,
+    y: i32,
+    dy: f32,
+    from_scale: f32,
+    to_scale: f32,
+    from_op: f32,
+    to_op: f32,
+    duration_ms: u32,
+    easing: Easing,
+) Animation {
+    const fx: f32 = @floatFromInt(x);
+    const fy: f32 = @floatFromInt(y);
+    return .{
+        .kind = .move,
+        .easing = easing,
+        .start_ns = nowNs(),
+        .duration_ns = @as(i64, duration_ms) * std.time.ns_per_ms,
+        .start_x = fx,
+        .start_y = fy,
+        .target_x = fx,
+        .target_y = fy + dy,
+        .last_x = fx,
+        .last_y = fy,
+        .nudge_dx = 0,
+        .start_opacity = from_op,
+        .target_opacity = to_op,
+        .last_opacity = from_op,
+        .start_scale = from_scale,
+        .target_scale = to_scale,
+        .last_scale = from_scale,
+        .start_fx = 1.0,
+        .start_fy = 1.0,
+        .last_fx = 1.0,
+        .last_fy = 1.0,
+        .scale_origin_bottom = true,
+    };
+}
+
+/// Arm an unminimize: the mirror of armMinimize — slide UP from `dy` below the
+/// rest position, grow from `from_scale` to `to_scale`, fade in. Scale origin
+/// at the BOTTOM center (P10 p10Unminimize: translateY 60->0, scale 0.55->1,
+/// opacity 0->1, 220ms ease-out, transform-origin: bottom center).
+/// Caller passes the REST position (x, y); start_y is y+dy, target_y is y.
+pub fn armUnminimize(
+    x: i32,
+    y: i32,
+    dy: f32,
+    from_scale: f32,
+    to_scale: f32,
+    from_op: f32,
+    to_op: f32,
+    duration_ms: u32,
+    easing: Easing,
+) Animation {
+    const fx: f32 = @floatFromInt(x);
+    const fy: f32 = @floatFromInt(y);
+    return .{
+        .kind = .move,
+        .easing = easing,
+        .start_ns = nowNs(),
+        .duration_ns = @as(i64, duration_ms) * std.time.ns_per_ms,
+        .start_x = fx,
+        .start_y = fy + dy,
+        .target_x = fx,
+        .target_y = fy,
+        .last_x = fx,
+        .last_y = fy + dy,
+        .nudge_dx = 0,
+        .start_opacity = from_op,
+        .target_opacity = to_op,
+        .last_opacity = from_op,
+        .start_scale = from_scale,
+        .target_scale = to_scale,
+        .last_scale = from_scale,
+        .start_fx = 1.0,
+        .start_fy = 1.0,
+        .last_fx = 1.0,
+        .last_fy = 1.0,
+        .scale_origin_bottom = true,
+    };
+}
+
+/// Arm a deck-switch OUT (the window leaving the deck slot): a short lateral
+/// slide of `dx` px (positive = right for DECK_NEXT, negative = left for
+/// DECK_PREV) with a fade out, no scale. P2.3 p9DeckOutRight/Left: 130ms ease-in,
+/// opacity 1->0. Used via spawnDeckOut (orphan tree) since the live window is
+/// being hidden, not destroyed.
+pub fn armDeckOut(x: i32, y: i32, dx: f32, duration_ms: u32, easing: Easing) Animation {
+    const fx: f32 = @floatFromInt(x);
+    const fy: f32 = @floatFromInt(y);
+    return .{
+        .kind = .slide,
+        .easing = easing,
+        .start_ns = nowNs(),
+        .duration_ns = @as(i64, duration_ms) * std.time.ns_per_ms,
+        .start_x = fx,
+        .start_y = fy,
+        .target_x = fx + dx,
+        .target_y = fy,
+        .last_x = fx,
+        .last_y = fy,
+        .nudge_dx = 0,
+        // Solid slide out + fade: opacity 1 -> 0, scale fixed 1.
+        .start_opacity = 1.0,
+        .target_opacity = 0.0,
+        .last_opacity = 1.0,
+        .start_scale = 1.0,
+        .target_scale = 1.0,
+        .last_scale = 1.0,
+        .start_fx = 1.0,
+        .start_fy = 1.0,
+        .last_fx = 1.0,
+        .last_fy = 1.0,
+    };
+}
+
+/// Arm a deck-switch IN (the window entering the deck slot): a lateral slide
+/// of `dx` px (negative = from the left for DECK_NEXT, positive = from the
+/// right for DECK_PREV) with a fade in and a traveling clip. P2.3 p9DeckInLeft/
+/// Right: 200ms ease-out, opacity 0->1, clip-path inset left travels from
+/// |dx| to 0. The clip pins the visible left border at the main<->deck division
+/// so the window does not appear to cross over the main slot.
+pub fn armDeckIn(x: i32, y: i32, dx: f32, duration_ms: u32, easing: Easing) Animation {
+    const fx: f32 = @floatFromInt(x);
+    const fy: f32 = @floatFromInt(y);
+    return .{
+        .kind = .slide,
+        .easing = easing,
+        .start_ns = nowNs(),
+        .duration_ns = @as(i64, duration_ms) * std.time.ns_per_ms,
+        .start_x = fx + dx,
+        .start_y = fy,
+        .target_x = fx,
+        .target_y = fy,
+        .last_x = fx + dx,
+        .last_y = fy,
+        .nudge_dx = 0,
+        // Slide in + fade in: opacity 0 -> 1, scale fixed 1.
+        .start_opacity = 0.0,
+        .target_opacity = 1.0,
+        .last_opacity = 0.0,
+        .start_scale = 1.0,
+        .target_scale = 1.0,
+        .last_scale = 1.0,
+        .start_fx = 1.0,
+        .start_fy = 1.0,
+        .last_fx = 1.0,
+        .last_fy = 1.0,
+        .clip_travel = true,
+        .clip_travel_x = @abs(dx),
+    };
+}
+
 /// Arm a focus nudge: a brief lateral bump of `peak_dx` px around the resting
 /// position (x, y), returning to rest. Position only — no fade, no scale.
 pub fn armNudge(x: i32, y: i32, peak_dx: f32, duration_ms: u32) Animation {
@@ -400,7 +573,7 @@ pub fn armNudge(x: i32, y: i32, peak_dx: f32, duration_ms: u32) Animation {
 }
 
 /// Normalized eased progress at time `now_ns`, clamped to [0,1].
-fn progress(anim: Animation, now_ns: i64) f32 {
+pub fn progress(anim: Animation, now_ns: i64) f32 {
     if (anim.duration_ns <= 0) return 1.0;
     // Hold at 0 during the optional pre-roll delay, then measure from its end.
     const elapsed = now_ns - anim.start_ns - anim.delay_ns;
@@ -715,6 +888,105 @@ pub fn spawnClose(
     scheduleAllOutputFrames();
 }
 
+/// Snapshot the buffers under `src_node` into a standalone close_overlay tree
+/// and animate a deck-switch OUT: a short lateral slide of `dx` px (positive =
+/// right for DECK_NEXT, negative = left for DECK_PREV) with a fade out, no
+/// shrink (P2.3 p9DeckOutRight/Left: 130ms ease-in, opacity 1->0). Used when a
+/// window leaves the deck slot and is hidden (not destroyed) — the live window
+/// is disabled underneath, the orphan carries the exit animation and self-
+/// destructs. No-op if there are no buffers or on allocation failure.
+pub fn spawnDeckOut(
+    src_node: *wlr.SceneNode,
+    x: i32,
+    y: i32,
+    nat_w: i32,
+    nat_h: i32,
+    dx: f32,
+    duration_ms: u32,
+    easing: Easing,
+) void {
+    ensureOrphanList();
+
+    const tree = server.scene.layers.close_overlay.createSceneTree() catch return;
+    tree.node.setPosition(x, y);
+
+    var ctx: CopyCtx = .{ .dest = tree, .ok = true };
+    src_node.forEachBuffer(*CopyCtx, copyBufferIter, &ctx);
+
+    if (!ctx.ok or tree.children.empty()) {
+        tree.node.destroy();
+        return;
+    }
+
+    const orphan = util.gpa.create(OrphanClose) catch {
+        tree.node.destroy();
+        return;
+    };
+
+    orphan.* = .{
+        .link = undefined,
+        .tree = tree,
+        .anim = armDeckOut(x, y, dx, duration_ms, easing),
+        .x = x,
+        .y = y,
+        .nat_w = nat_w,
+        .nat_h = nat_h,
+    };
+    orphans.append(orphan);
+
+    scheduleAllOutputFrames();
+}
+
+/// Snapshot the buffers under `src_node` into a standalone close_overlay tree
+/// and animate a minimize: slide DOWN by `dy` px + shrink from 1 to `to_scale`
+/// around the BOTTOM center + fade out (P10 p10Minimize: translateY 0->60,
+/// scale 1->0.55, opacity 1->0, 200ms ease-in, origin bottom center). Used when
+/// a window is minimized (removed from the visible set) — the live window is
+/// hidden underneath, the orphan carries the exit and self-destructs. No-op if
+/// no buffers / OOM.
+pub fn spawnMinimize(
+    src_node: *wlr.SceneNode,
+    x: i32,
+    y: i32,
+    nat_w: i32,
+    nat_h: i32,
+    dy: f32,
+    to_scale: f32,
+    duration_ms: u32,
+    easing: Easing,
+) void {
+    ensureOrphanList();
+
+    const tree = server.scene.layers.close_overlay.createSceneTree() catch return;
+    tree.node.setPosition(x, y);
+
+    var ctx: CopyCtx = .{ .dest = tree, .ok = true };
+    src_node.forEachBuffer(*CopyCtx, copyBufferIter, &ctx);
+
+    if (!ctx.ok or tree.children.empty()) {
+        tree.node.destroy();
+        return;
+    }
+
+    const orphan = util.gpa.create(OrphanClose) catch {
+        tree.node.destroy();
+        return;
+    };
+
+    orphan.* = .{
+        .link = undefined,
+        .tree = tree,
+        .anim = armMinimize(x, y, dy, 1.0, to_scale, 1.0, 0.0, duration_ms, easing),
+        .x = x,
+        .y = y,
+        .nat_w = nat_w,
+        .nat_h = nat_h,
+    };
+    orphans.append(orphan);
+
+    scheduleAllOutputFrames();
+}
+
 /// Schedule a frame on every powered output. Used to start the animation loop
 /// from contexts outside handleFrame (e.g. a close spawned at unmap time).
 pub fn scheduleAllOutputFrames() void {
@@ -742,7 +1014,15 @@ pub fn advanceOrphans(now_ns: i64) bool {
         // sampled x/y carry the slide (start -> start+dx); the fade close keeps
         // s.x == orphan.x (armFade fixes target_x = x), so this also covers it.
         const r = applyScale(&orphan.tree.node, s.scale, orphan.nat_w, orphan.nat_h);
-        orphan.tree.node.setPosition(s.x + r.dx, s.y + r.dy);
+        var oy: i32 = r.dy;
+        // Minimize orphan: scale origin at the BOTTOM center, not the center, so
+        // the shrink goes toward the bottom edge (toward the taskbar). Override
+        // the center recenter dy = (1-scale)*h/2 with (1-scale)*h. P10 origin.
+        if (orphan.anim.scale_origin_bottom) {
+            const h_f: f32 = @floatFromInt(orphan.nat_h);
+            oy = @intFromFloat(@round((1.0 - s.scale) * h_f));
+        }
+        orphan.tree.node.setPosition(s.x + r.dx, s.y + oy);
         any_active = true;
     }
     return any_active;
