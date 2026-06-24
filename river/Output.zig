@@ -25,6 +25,11 @@ const Window = @import("Window.zig");
 
 const log = std.log.scoped(.output);
 
+/// After this many consecutive tearing page-flip test failures, stop testing
+/// for tearing_retry_cooldown_frames frames before trying again.
+const tearing_failure_limit = 10;
+const tearing_retry_cooldown_frames = 120;
+
 pub const State = struct {
     state: enum {
         /// Powered on and exposed to the window manager
@@ -175,6 +180,16 @@ rendering_requested: RenderingState = .init,
 /// State applied to the wlr_output and rendered.
 current: State,
 rendering_current: RenderingState = .init,
+
+/// Backoff state for the tearing page-flip hardware test (see renderAndCommit).
+/// Avoids running wlr_output.testState() with tearing_page_flip on every frame
+/// when it consistently fails (resolves the per-frame-test TODO below), and
+/// caches a recent success so a known-good output skips the test for a while.
+tearing_test_failures: u8 = 0,
+tearing_test_cooldown: u8 = 0,
+tearing_test_succeeded: bool = false,
+tearing_test_frame_counter: u8 = 0,
+last_direct_scanout: bool = false,
 
 destroy: wl.Listener(*wlr.Output) = .init(handleDestroy),
 request_state: wl.Listener(*wlr.Output.event.RequestState) = .init(handleRequestState),
@@ -461,25 +476,80 @@ fn renderAndCommit(output: *Output) !void {
     if (!output.scene_output.?.needsFrame()) return;
 
     const wlr_output = output.wlr_output.?;
+    const scene_output = output.scene_output.?;
 
     var state = wlr.Output.State.init();
     defer state.finish();
 
     output.current.applyNoModeset(&state);
 
-    if (!output.scene_output.?.buildState(&state, null)) return error.CommitFailed;
+    if (!scene_output.buildState(&state, null)) return error.CommitFailed;
 
     if (output.rendering_current.tearing) {
-        state.tearing_page_flip = true;
-        // TODO don't try this every frame if it consistently fails. Stop trying if it fails
-        // for 10 frames in a row or something.
-        if (!wlr_output.testState(&state)) {
-            log.info("tearing page flip test failed for {s}, retrying without tearing", .{wlr_output.name});
-            state.tearing_page_flip = false;
+        // Don't run the tearing page-flip test on every frame. The hardware test
+        // (testState with tearing_page_flip) is not free, and on outputs where
+        // tearing is not currently possible — e.g. direct scanout is not active —
+        // it fails every frame. Back off after a run of failures, and once a test
+        // succeeds, trust it for a while instead of re-testing each frame.
+        const cur_scanout = scene_output.private.prev_scanout;
+        if (cur_scanout != output.last_direct_scanout) {
+            // Scanout state changed: a cached success/failure no longer applies,
+            // and we should re-evaluate immediately rather than wait out a
+            // cooldown that was started under the old scanout state.
+            output.tearing_test_succeeded = false;
+            output.tearing_test_failures = 0;
+            output.tearing_test_cooldown = 0;
+            output.last_direct_scanout = cur_scanout;
         }
+
+        if (output.tearing_test_cooldown > 0) {
+            output.tearing_test_cooldown -= 1;
+        } else {
+            state.tearing_page_flip = true;
+            if (output.tearing_test_succeeded) {
+                // Recently succeeded: skip the test, but re-test periodically.
+                output.tearing_test_frame_counter +%= 1;
+                if (output.tearing_test_frame_counter >= tearing_retry_cooldown_frames) {
+                    output.tearing_test_succeeded = false;
+                }
+            } else if (!wlr_output.testState(&state)) {
+                state.tearing_page_flip = false;
+                output.tearing_test_failures +|= 1;
+                if (output.tearing_test_failures >= tearing_failure_limit) {
+                    output.tearing_test_failures = 0;
+                    output.tearing_test_cooldown = tearing_retry_cooldown_frames;
+                    log.info("tearing page flip test failed repeatedly for {s}, cooling down retries", .{wlr_output.name});
+                } else {
+                    log.info("tearing page flip test failed for {s}, retrying without tearing", .{wlr_output.name});
+                }
+            } else {
+                output.tearing_test_failures = 0;
+                output.tearing_test_succeeded = true;
+                output.tearing_test_frame_counter = 0;
+            }
+        }
+    } else {
+        output.tearing_test_failures = 0;
+        output.tearing_test_cooldown = 0;
+        output.tearing_test_succeeded = false;
+        output.tearing_test_frame_counter = 0;
     }
 
-    if (!wlr_output.commitState(&state)) return error.CommitFailed;
+    if (!wlr_output.commitState(&state)) {
+        // A commit that we attempted with tearing_page_flip and that failed is
+        // evidence the tearing path is not currently viable: feed it back into
+        // the backoff (drop the cached success and count it as a failure, arming
+        // the cooldown if we hit the limit) so we stop attempting it every frame.
+        output.tearing_test_succeeded = false;
+        if (state.tearing_page_flip) {
+            output.tearing_test_failures +|= 1;
+            if (output.tearing_test_failures >= tearing_failure_limit) {
+                output.tearing_test_failures = 0;
+                output.tearing_test_cooldown = tearing_retry_cooldown_frames;
+            }
+        }
+        return error.CommitFailed;
+    }
 
     switch (server.lock_manager.state) {
         .unlocked => {
