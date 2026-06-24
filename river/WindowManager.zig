@@ -489,22 +489,25 @@ fn renderFinish(wm: *WindowManager) void {
     //
     // TODO(wlroots) provide a way to batch changes to the scene graph.
     const new_order_hash = blk: {
-        var hash = std.crypto.hash.Blake3.init(.{});
+        // The render order only needs a cheap, non-cryptographic fingerprint to
+        // detect reordering between commits — Blake3 is overkill here. FNV-1a
+        // over the same per-node identity bytes is plenty and avoids pulling a
+        // crypto hash into the per-commit hot path.
+        var hash_val: u64 = 14695981039346656037; // FNV-1a 64-bit offset basis
+        const prime: u64 = 1099511628211; // FNV-1a 64-bit prime
         var it = wm.rendering_requested.list.iterator(.forward);
         while (it.next()) |node| {
             switch (node.get()) {
                 .window => |window| {
-                    hash.update(@ptrCast(&window.ref));
-                    hash.update(&.{@intFromBool(renderedFullscreen(window))});
+                    hash_val = (hash_val ^ @as(u64, @bitCast(window.ref))) *% prime;
+                    hash_val = (hash_val ^ @as(u64, @intFromBool(renderedFullscreen(window)))) *% prime;
                 },
                 .shell_surface => |shell_surface| {
-                    hash.update(@ptrCast(&shell_surface));
+                    hash_val = (hash_val ^ @intFromPtr(shell_surface)) *% prime;
                 },
             }
         }
-        var final: u64 = undefined;
-        hash.final(@ptrCast(&final));
-        break :blk final;
+        break :blk hash_val;
     };
 
     {
