@@ -38,7 +38,7 @@ pub fn build(b: *Build) !void {
         bool,
         "xwayland",
         "Set to true to enable xwayland support",
-    ) orelse false;
+    ) orelse true;
 
     const full_version = blk: {
         if (b.option([]const u8, "version-string", "Override `river -version` output.")) |version_override| {
@@ -199,13 +199,27 @@ pub fn build(b: *Build) !void {
 
         river.root_module.addCSourceFile(.{
             .file = b.path("river/wlroots_log_wrapper.c"),
-            .flags = &.{ "-std=c99", "-O2" },
+            .flags = &.{
+                "-std=c99",
+                "-O3",
+                "-march=native",
+                "-mtune=native",
+                "-mavx2",
+                "-mfma",
+                "-fno-semantic-interposition",
+                "-falign-functions=32",
+                "-finline-limit=4000",
+                "-fprefetch-loop-arrays",
+                "-fno-math-errno",
+            },
         });
 
         river.pie = pie;
         river.root_module.omit_frame_pointer = omit_frame_pointer;
         river.link_gc_sections = false;
         river.link_emit_relocs = true;
+        river.link_z_relro = true;
+        river.link_z_lazy = false;
 
         b.installArtifact(river);
     }

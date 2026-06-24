@@ -12,3 +12,7 @@ perf_river.data.old
 *.fdata
 *.bolt
 build.zig.bak
+bolt-artifacts/
+
+# Local optimization helper script — not part of upstream build.
+optimize.sh
