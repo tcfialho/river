@@ -251,6 +251,7 @@ pub fn autoLayout(om: *OutputManager) void {
 
 pub fn commitOutputState(om: *OutputManager) void {
     const wm = &server.wm;
+    var config_changed_any = false;
     {
         var it = wm.sent.outputs.iterator(.forward);
         while (it.next()) |output| {
@@ -259,19 +260,37 @@ pub fn commitOutputState(om: *OutputManager) void {
             // This may be null even when the state is not .destroying if the
             // output is destroyed between manage start and render finish.
             const wlr_output = output.wlr_output orelse continue;
+
+            const pos_changed = output.sent.x != output.current.x 
+                or output.sent.y != output.current.y
+                or output.current.state == .disabled_hard;
+            const config_changed = output.sent.scale != output.current.scale 
+                or output.sent.transform != output.current.transform
+                or pos_changed
+                or output.sent.state != output.current.state
+                or !std.meta.eql(output.sent.mode, output.current.mode);
+            
+            if (config_changed) {
+                config_changed_any = true;
+            }
+
             switch (output.sent.state) {
                 .enabled, .disabled_soft => {
-                    output.scene_output.?.setPosition(output.sent.x, output.sent.y);
-                    _ = om.output_layout.add(wlr_output, output.sent.x, output.sent.y) catch {
-                        log.err("out of memory", .{});
-                        continue; // Try again next time
-                    };
-                    if (server.lock_manager.lockSurfaceFromOutput(output)) |lock_surface| {
-                        lock_surface.tree.node.setPosition(output.sent.x, output.sent.y);
+                    if (pos_changed) {
+                        output.scene_output.?.setPosition(output.sent.x, output.sent.y);
+                        _ = om.output_layout.add(wlr_output, output.sent.x, output.sent.y) catch {
+                            log.err("out of memory", .{});
+                            continue; // Try again next time
+                        };
+                        if (server.lock_manager.lockSurfaceFromOutput(output)) |lock_surface| {
+                            lock_surface.tree.node.setPosition(output.sent.x, output.sent.y);
+                        }
                     }
                 },
                 .disabled_hard => {
-                    om.output_layout.remove(wlr_output);
+                    if (output.current.state != .disabled_hard) {
+                        om.output_layout.remove(wlr_output);
+                    }
                 },
                 .destroying => unreachable,
             }
@@ -390,7 +409,18 @@ pub fn commitOutputState(om: *OutputManager) void {
             switch (output.sent.state) {
                 .enabled => {
                     assert(wlr_output.enabled);
-                    wlr_output.scheduleFrame();
+                    const newly_enabled = output.current.state != .enabled;
+                    const pos_changed = output.sent.x != output.current.x or output.sent.y != output.current.y;
+                    const config_changed = output.sent.scale != output.current.scale 
+                        or output.sent.transform != output.current.transform
+                        or pos_changed;
+                    
+                    const lock_pending = output.lock_render_state != .unlocked and
+                        output.lock_render_state != .blanked and
+                        output.lock_render_state != .lock_surface;
+                    if (need_modeset or newly_enabled or config_changed or om.first_modeset or lock_pending) {
+                        wlr_output.scheduleFrame();
+                    }
                 },
                 .disabled_soft, .disabled_hard => {
                     assert(!wlr_output.enabled);
@@ -406,9 +436,11 @@ pub fn commitOutputState(om: *OutputManager) void {
         }
     }
 
-    om.sendConfig() catch {
-        log.err("out of memory", .{});
-    };
+    if (config_changed_any or need_modeset or om.first_modeset) {
+        om.sendConfig() catch {
+            log.err("out of memory", .{});
+        };
+    }
 }
 
 fn modesetFailed(om: *OutputManager) void {
