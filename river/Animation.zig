@@ -159,30 +159,32 @@ last_y: f32,
 
 /// Nudge peak lateral offset (px). For `.nudge`, the applied x is
 /// start_x + nudge_dx * sin(pi * progress): 0 at start/end, peak at the middle.
-/// Zero for non-nudge animations.
-nudge_dx: f32,
+/// Zero for non-nudge animations. Defaults to the neutral value so the armX
+/// builders only set it when non-zero.
+nudge_dx: f32 = 0,
 
-/// Opacity endpoints, in [0,1].
-start_opacity: f32,
-target_opacity: f32,
-last_opacity: f32,
+/// Opacity endpoints, in [0,1]. Default 1.0 (fully opaque, no fade) so a builder
+/// that does not fade can omit these.
+start_opacity: f32 = 1.0,
+target_opacity: f32 = 1.0,
+last_opacity: f32 = 1.0,
 
 /// Uniform scale endpoints (1.0 = natural size), applied around the window
 /// center via SceneBuffer.setDestSize; 1.0 -> 1.0 means "no scale" (pure move).
-/// The open/close pop (0.65 <-> 1) lives here.
-start_scale: f32,
-target_scale: f32,
-last_scale: f32,
+/// The open/close pop (0.65 <-> 1) lives here. Default 1.0 (no scale).
+start_scale: f32 = 1.0,
+target_scale: f32 = 1.0,
+last_scale: f32 = 1.0,
 
 /// Size-tween endpoints, as a fraction of the *current committed* buffer size
 /// per axis. A window growing from old size to new (the client already commits
 /// the new-size buffer) starts at old/new (< 1) and ends at 1.0, so the new
 /// content appears to zoom from the old footprint. 1.0/1.0 means "no size tween".
-/// Composed multiplicatively with the uniform scale above.
-start_fx: f32,
-start_fy: f32,
-last_fx: f32,
-last_fy: f32,
+/// Composed multiplicatively with the uniform scale above. Default 1.0 (none).
+start_fx: f32 = 1.0,
+start_fy: f32 = 1.0,
+last_fx: f32 = 1.0,
+last_fy: f32 = 1.0,
 
 /// When true, the per-axis factor (fx) drives a CLIP REVEAL instead of a texture
 /// scale: the surface stays at its final committed size (no distortion), and a
@@ -282,7 +284,8 @@ pub fn armMove(
         .target_y = @floatFromInt(target_y),
         .last_x = sx,
         .last_y = sy,
-        .nudge_dx = 0,
+        // opacity/scale/fx/fy are carried from `existing` (dynamic retargeting) —
+        // they must stay explicit, NOT defaulted. Only nudge_dx is always neutral.
         .start_opacity = start_opacity,
         .target_opacity = target_opacity,
         .last_opacity = start_opacity,
@@ -336,18 +339,14 @@ pub fn armFade(
         .target_y = fy,
         .last_x = fx,
         .last_y = fy,
-        .nudge_dx = 0,
+        // opacity and scale carry the fade/pop endpoints; size (fx/fy) and
+        // nudge_dx stay at their neutral defaults (no size tween, no nudge).
         .start_opacity = from_opacity,
         .target_opacity = to_opacity,
         .last_opacity = from_opacity,
         .start_scale = from_scale,
         .target_scale = to_scale,
         .last_scale = from_scale,
-        // open/close has no size tween (footprint is natural throughout).
-        .start_fx = 1.0,
-        .start_fy = 1.0,
-        .last_fx = 1.0,
-        .last_fy = 1.0,
     };
 }
 
@@ -365,6 +364,8 @@ pub fn scales(anim: Animation) bool {
 pub fn armSlide(x: i32, y: i32, dx: f32, duration_ms: u32, easing: Easing) Animation {
     const fx: f32 = @floatFromInt(x);
     const fy: f32 = @floatFromInt(y);
+    // Solid slide: opacity/scale/size all stay at their neutral defaults (1.0),
+    // nudge_dx defaults to 0 — only position, kind, easing and timing differ.
     return .{
         .kind = .slide,
         .easing = easing,
@@ -376,18 +377,6 @@ pub fn armSlide(x: i32, y: i32, dx: f32, duration_ms: u32, easing: Easing) Anima
         .target_y = fy,
         .last_x = fx,
         .last_y = fy,
-        .nudge_dx = 0,
-        // Solid slide: opacity and scale are held constant (no fade/pop).
-        .start_opacity = 1.0,
-        .target_opacity = 1.0,
-        .last_opacity = 1.0,
-        .start_scale = 1.0,
-        .target_scale = 1.0,
-        .last_scale = 1.0,
-        .start_fx = 1.0,
-        .start_fy = 1.0,
-        .last_fx = 1.0,
-        .last_fy = 1.0,
     };
 }
 
@@ -419,17 +408,14 @@ pub fn armMinimize(
         .target_y = fy + dy,
         .last_x = fx,
         .last_y = fy,
-        .nudge_dx = 0,
+        // opacity and scale carry the minimize endpoints; size (fx/fy) and
+        // nudge_dx stay neutral. scale_origin_bottom differs from the default.
         .start_opacity = from_op,
         .target_opacity = to_op,
         .last_opacity = from_op,
         .start_scale = from_scale,
         .target_scale = to_scale,
         .last_scale = from_scale,
-        .start_fx = 1.0,
-        .start_fy = 1.0,
-        .last_fx = 1.0,
-        .last_fy = 1.0,
         .scale_origin_bottom = true,
     };
 }
@@ -463,17 +449,14 @@ pub fn armUnminimize(
         .target_y = fy,
         .last_x = fx,
         .last_y = fy + dy,
-        .nudge_dx = 0,
+        // opacity and scale carry the unminimize endpoints; size (fx/fy) and
+        // nudge_dx stay neutral. scale_origin_bottom differs from the default.
         .start_opacity = from_op,
         .target_opacity = to_op,
         .last_opacity = from_op,
         .start_scale = from_scale,
         .target_scale = to_scale,
         .last_scale = from_scale,
-        .start_fx = 1.0,
-        .start_fy = 1.0,
-        .last_fx = 1.0,
-        .last_fy = 1.0,
         .scale_origin_bottom = true,
     };
 }
@@ -497,20 +480,9 @@ pub fn armDeckOut(x: i32, y: i32, dx: f32, duration_ms: u32, easing: Easing) Ani
         .target_y = fy,
         .last_x = fx,
         .last_y = fy,
-        .nudge_dx = 0,
-        // Solid slide out + fade: opacity 1 -> 0, scale fixed 1.
-        .start_opacity = 1.0,
+        // Solid slide out + fade: only target_opacity (->0) and fade_fast differ
+        // from the neutral defaults; scale/size/start+last opacity stay neutral.
         .target_opacity = 0.0,
-        .last_opacity = 1.0,
-        .start_scale = 1.0,
-        .target_scale = 1.0,
-        .last_scale = 1.0,
-        .start_fx = 1.0,
-        .start_fy = 1.0,
-        .last_fx = 1.0,
-        .last_fy = 1.0,
-        .clip_travel = false,
-        .clip_travel_x = 0.0,
         .fade_fast = true,
     };
 }
@@ -535,18 +507,10 @@ pub fn armDeckIn(x: i32, y: i32, dx: f32, duration_ms: u32, easing: Easing) Anim
         .target_y = fy,
         .last_x = fx + dx,
         .last_y = fy,
-        .nudge_dx = 0,
-        // Slide in + fade in: opacity 0 -> 1, scale fixed 1.
+        // Slide in + fade in: start/last opacity begin at 0 (target_opacity stays
+        // at the 1.0 default). scale/size neutral. Traveling clip when dx < 0.
         .start_opacity = 0.0,
-        .target_opacity = 1.0,
         .last_opacity = 0.0,
-        .start_scale = 1.0,
-        .target_scale = 1.0,
-        .last_scale = 1.0,
-        .start_fx = 1.0,
-        .start_fy = 1.0,
-        .last_fx = 1.0,
-        .last_fy = 1.0,
         .clip_travel = (dx < 0.0),
         .clip_travel_x = if (dx < 0.0) @abs(dx) else 0.0,
     };
@@ -568,17 +532,8 @@ pub fn armNudge(x: i32, y: i32, peak_dx: f32, duration_ms: u32) Animation {
         .target_y = fy,
         .last_x = fx,
         .last_y = fy,
+        // Only nudge_dx differs from neutral; opacity/scale/size stay at 1.0.
         .nudge_dx = peak_dx,
-        .start_opacity = 1.0,
-        .target_opacity = 1.0,
-        .last_opacity = 1.0,
-        .start_scale = 1.0,
-        .target_scale = 1.0,
-        .last_scale = 1.0,
-        .start_fx = 1.0,
-        .start_fy = 1.0,
-        .last_fx = 1.0,
-        .last_fy = 1.0,
     };
 }
 
@@ -792,17 +747,6 @@ pub const OrphanClose = struct {
     }
 };
 
-/// Intrusive list of in-flight orphan close animations. Empty in steady state.
-var orphans: wl.list.Head(OrphanClose, .link) = undefined;
-var orphans_initialized = false;
-
-fn ensureOrphanList() void {
-    if (!orphans_initialized) {
-        orphans.init();
-        orphans_initialized = true;
-    }
-}
-
 /// Context for copying a window's live buffers into the orphan tree.
 const CopyCtx = struct {
     dest: *wlr.SceneTree,
@@ -847,8 +791,6 @@ pub fn spawnClose(
     style: CloseStyle,
     easing: Easing,
 ) void {
-    ensureOrphanList();
-
     // Use the dedicated close_overlay layer (above live windows, below the bar)
     // so the fade is not occluded by a window the WM raises into the same slot.
     const tree = server.scene.layers.close_overlay.createSceneTree() catch return;
@@ -892,7 +834,7 @@ pub fn spawnClose(
         .nat_w = nat_w,
         .nat_h = nat_h,
     };
-    orphans.append(orphan);
+    server.orphans.append(orphan);
 
     // unmap runs outside the frame loop, so kick a frame on every output to
     // start advancing this fade.
@@ -916,8 +858,6 @@ pub fn spawnDeckOut(
     duration_ms: u32,
     easing: Easing,
 ) void {
-    ensureOrphanList();
-
     const tree = server.scene.layers.close_overlay.createSceneTree() catch return;
     tree.node.setPosition(x, y);
 
@@ -943,7 +883,7 @@ pub fn spawnDeckOut(
         .nat_w = nat_w,
         .nat_h = nat_h,
     };
-    orphans.append(orphan);
+    server.orphans.append(orphan);
 
     scheduleAllOutputFrames();
 }
@@ -966,8 +906,6 @@ pub fn spawnMinimize(
     duration_ms: u32,
     easing: Easing,
 ) void {
-    ensureOrphanList();
-
     const tree = server.scene.layers.close_overlay.createSceneTree() catch return;
     tree.node.setPosition(x, y);
 
@@ -993,7 +931,7 @@ pub fn spawnMinimize(
         .nat_w = nat_w,
         .nat_h = nat_h,
     };
-    orphans.append(orphan);
+    server.orphans.append(orphan);
 
     scheduleAllOutputFrames();
 }
@@ -1010,9 +948,8 @@ pub fn scheduleAllOutputFrames() void {
 /// Advance all orphan close animations to `now_ns`, applying opacity and
 /// destroying any that have finished. Returns true if any remain active.
 pub fn advanceOrphans(now_ns: i64) bool {
-    if (!orphans_initialized) return false;
     var any_active = false;
-    var it = orphans.safeIterator(.forward);
+    var it = server.orphans.safeIterator(.forward);
     while (it.next()) |orphan| {
         if (orphan.anim.done(now_ns)) {
             orphan.destroy();
@@ -1043,7 +980,6 @@ pub fn advanceOrphans(now_ns: i64) bool {
 /// and output destroy so buffers/trees are not leaked and the frame loop does
 /// not keep scheduling for orphans that can never be seen.
 pub fn destroyAllOrphans() void {
-    if (!orphans_initialized) return;
-    var it = orphans.safeIterator(.forward);
+    var it = server.orphans.safeIterator(.forward);
     while (it.next()) |orphan| orphan.destroy();
 }

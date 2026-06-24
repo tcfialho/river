@@ -53,16 +53,32 @@ const nudge_anim_ms: u32 = 160;
 /// Group open slide-in: the window enters as a solid panel from the left,
 /// starting offset by this fraction of its own width (P17 p15SlideIn: -45%).
 const slide_in_frac: f32 = 0.45;
+/// Deck-switch OUT (P2.3 p9DeckOut): lateral slide as a fraction of the window
+/// width, over deck_out_anim_ms. Direction (left/right) comes from the intent.
+const deck_out_dx_frac: f32 = 0.05;
+const deck_out_anim_ms: u32 = 100;
+/// Deck-switch IN (P2.3 p9DeckIn): entering slide as a fraction of the window
+/// width, over deck_in_anim_ms. Distinct from minimize_anim_ms despite the value.
+const deck_in_dx_frac: f32 = 0.30;
+const deck_in_anim_ms: u32 = 200;
+/// Minimize / unminimize (P10): translateY by minimize_dy px and scale to
+/// minimize_scale, around the bottom-center origin. The same dy is used both for
+/// the orphan animation AND the live unminimize start offset, so they must agree.
+const minimize_dy: f32 = 60.0;
+const minimize_scale: f32 = 0.55;
+const minimize_anim_ms: u32 = 200; // distinct from deck_in_anim_ms (same value, different meaning)
+const unminimize_anim_ms: u32 = 220; // distinct from open_anim_ms (same value, different meaning)
 
 /// Map the protocol easing enum value (river_window_v1 animation_easing) to the
 /// local tween easing. Unknown values fall back to `default`.
 fn animationEasingFromProtocol(value: u32, default: Animation.Easing) Animation.Easing {
     return switch (value) {
+        0x0 => .linear,
         0x1 => .ease_in,
         0x2 => .ease_out,
         0x3 => .ease_in_out, // CSS cubic-bezier(0.42,0,0.58,1), bit-exact (P17 reflow)
         0x4 => .spring, // cubic_spring(0.22,1,0.36,1)
-        // 0x0 linear has no distinct local curve yet; falls back to `default`.
+        // Unknown/future values fall back to the caller's default easing.
         else => default,
     };
 }
@@ -170,14 +186,14 @@ const RenderingRequested = struct {
     border: Border,
     clip: wlr.Box,
     content_clip: wlr.Box,
-    animation_intent: u32 = 0,           // AnimationIntent enum value (one-shot, per render)
-    animation_duration_ms: u32 = 0,      // Duration in milliseconds (0 = default)
-    animation_easing: u32 = 0,           // AnimationEasing enum value
+    animation_intent: u32 = 0, // AnimationIntent enum value (one-shot, per render)
+    animation_duration_ms: u32 = 0, // Duration in milliseconds (0 = default)
+    animation_easing: u32 = 0, // AnimationEasing enum value
     // STICKY per-window close animation, pre-registered by the WM via
     // set_close_intent. Unlike animation_intent (consumed each render), this
     // persists across renders and is read at unmap time to pick the close
     // direction WITHOUT geometry inference. 0 (none) => fall back to fade_close.
-    close_intent: u32 = 0,               // AnimationIntent enum value
+    close_intent: u32 = 0, // AnimationIntent enum value
 
     pub const init: RenderingRequested = .{
         .x = 0,
@@ -699,20 +715,12 @@ fn handleRequest(
             };
         },
         .hide => {
-            if (!server.wm.ensureRendering()) {
-                log.info("[ANIM-DIAG] hide REJECTED (not render state) win='{?s}'", .{window.getTitle()});
-                return;
-            }
+            if (!server.wm.ensureRendering()) return;
             rendering_requested.hidden = true;
-            log.info("[ANIM-DIAG] hide APPLIED win='{?s}'", .{window.getTitle()});
         },
         .show => {
-            if (!server.wm.ensureRendering()) {
-                log.info("[ANIM-DIAG] show REJECTED (not render state) win='{?s}'", .{window.getTitle()});
-                return;
-            }
+            if (!server.wm.ensureRendering()) return;
             rendering_requested.hidden = false;
-            log.info("[ANIM-DIAG] show APPLIED win='{?s}'", .{window.getTitle()});
         },
         .use_ssd => {
             if (!server.wm.ensureWindowing()) return;
@@ -844,12 +852,7 @@ fn handleRequest(
             // it is valid during the render sequence, NOT only during manage.
             // The original scaffold used ensureWindowing() (manage-only), which
             // made the WM's render-path call a .sequence_order protocol error.
-            if (!server.wm.ensureRendering()) {
-                log.info("[ANIM-DIAG] set_animation_intent REJECTED (state not render/manage) win='{?s}'", .{window.getTitle()});
-                return;
-            }
-            const AnimIntent = @import("AnimationIntent.zig");
-            log.info("[ANIM-DIAG] set_animation_intent RECEIVED win='{?s}' intent={s}", .{ window.getTitle(), AnimIntent.intentName(@enumFromInt(@intFromEnum(args.intent))) });
+            if (!server.wm.ensureRendering()) return;
             rendering_requested.animation_intent = @intCast(@intFromEnum(args.intent));
             rendering_requested.animation_duration_ms = @intCast(args.duration_ms);
             rendering_requested.animation_easing = @intCast(@intFromEnum(args.easing));
@@ -1066,9 +1069,9 @@ pub fn renderFinish(window: *Window) void {
         (early_intent == .slide_deck_out or early_intent == .slide_deck_out_left))
     {
         const dx: f32 = if (early_intent == .slide_deck_out_left)
-            -@as(f32, @floatFromInt(old_w)) * 0.05
+            -@as(f32, @floatFromInt(old_w)) * deck_out_dx_frac
         else
-            @as(f32, @floatFromInt(old_w)) * 0.05;
+            @as(f32, @floatFromInt(old_w)) * deck_out_dx_frac;
         Animation.spawnDeckOut(
             &window.surfaces.tree.node,
             old_x,
@@ -1076,10 +1079,9 @@ pub fn renderFinish(window: *Window) void {
             old_w,
             old_h,
             dx,
-            100,
+            deck_out_anim_ms,
             .ease_in,
         );
-        log.info("[ANIM-DIAG]   -> spawned DECK-OUT orphan (slide+fade, dx={d:.2})", .{dx});
         // The intent is consumed by the orphan; clear so it does not leak.
         window.rendering_requested.animation_intent = 0;
         window.rendering_requested.animation_duration_ms = 0;
@@ -1099,12 +1101,11 @@ pub fn renderFinish(window: *Window) void {
             old_y,
             old_w,
             old_h,
-            60.0,
-            0.55,
-            200,
+            minimize_dy,
+            minimize_scale,
+            minimize_anim_ms,
             .ease_in,
         );
-        log.info("[ANIM-DIAG]   -> spawned MINIMIZE orphan (slide-down+bottom-scale+fade)", .{});
         window.rendering_requested.animation_intent = 0;
         window.rendering_requested.animation_duration_ms = 0;
         window.rendering_requested.animation_easing = 0;
@@ -1162,19 +1163,6 @@ pub fn renderFinish(window: *Window) void {
     // at the end of the open/move arming below so it never leaks into the next).
     const AnimIntent = @import("AnimationIntent.zig");
     const open_intent: AnimIntent.Intent = @enumFromInt(window.rendering_requested.animation_intent);
-    // [ANIM-DIAG] instrumentação temporária: o que o river VAI armar, e o estado que
-    // decide. Remover após o diagnóstico das animações (2026-06-22).
-    log.info("[ANIM-DIAG] win='{?s}' intent={s} first_show={} moved={} resized={} enabled={} can_move={} anim_pos={} hidden={}", .{
-        window.getTitle(),
-        AnimIntent.intentName(open_intent),
-        first_show,
-        moved,
-        resized,
-        enabled,
-        can_move_anim,
-        window.anim_positioned,
-        requested.hidden,
-    });
     // P10 unminimize: the window is RETURNING from the minimized stack, so it is
     // visible and live — animate it on the live tree (slide-up + bottom-origin
     // grow + fade-in). P10 p10Unminimize. (Minimize is handled earlier as an
@@ -1183,16 +1171,25 @@ pub fn renderFinish(window: *Window) void {
         const dur: u32 = if (window.rendering_requested.animation_duration_ms != 0)
             window.rendering_requested.animation_duration_ms
         else
-            220;
+            unminimize_anim_ms;
         const easing = animationEasingFromProtocol(window.rendering_requested.animation_easing, .ease_out);
         window.anim = Animation.armUnminimize(
-            window.box.x, window.box.y, 60.0, 0.55, 1.0, 0.0, 1.0, dur, easing,
+            window.box.x,
+            window.box.y,
+            minimize_dy,
+            minimize_scale,
+            1.0,
+            0.0,
+            1.0,
+            dur,
+            easing,
         );
-        // Start at the offset position (y+60); the driver samples toward y.
-        window.tree.node.setPosition(window.box.x, window.box.y + 60);
-        window.popup_tree.node.setPosition(window.box.x, window.box.y + 60);
+        // Start at the offset position (y + minimize_dy); the driver samples
+        // toward y. Use the same constant as the animation so they cannot drift.
+        const dy_off: i32 = @intFromFloat(minimize_dy);
+        window.tree.node.setPosition(window.box.x, window.box.y + dy_off);
+        window.popup_tree.node.setPosition(window.box.x, window.box.y + dy_off);
         Animation.scheduleAllOutputFrames();
-        log.info("[ANIM-DIAG]   -> armed UNMINIMIZE (bottom-origin scale+translateY+fade)", .{});
         window.rendering_requested.animation_intent = 0;
         window.rendering_requested.animation_duration_ms = 0;
         window.rendering_requested.animation_easing = 0;
@@ -1217,7 +1214,6 @@ pub fn renderFinish(window: *Window) void {
             window.anim.?.is_entrance_slide = true;
             window.tree.node.setPosition(start_x, window.box.y);
             window.popup_tree.node.setPosition(start_x, window.box.y);
-            log.info("[ANIM-DIAG]   -> armed SLIDE (first_show slide_in)", .{});
         } else {
             // First time the window is shown: fade + scale in at its final
             // position (do not fly in from the origin). Opacity 0->1, scale
@@ -1226,7 +1222,6 @@ pub fn renderFinish(window: *Window) void {
             window.popup_tree.node.setPosition(window.box.x, window.box.y);
             Animation.applyOpacity(&window.surfaces.tree.node, 0.0);
             window.anim = Animation.armFade(.open, window.box.x, window.box.y, 0.0, 1.0, open_scale, 1.0, open_anim_ms, .ease_out);
-            log.info("[ANIM-DIAG]   -> armed FADE (first_show default)", .{});
         }
         Animation.scheduleAllOutputFrames();
         // one-shot consumed: clear all three so a stale intent/duration/easing
@@ -1257,20 +1252,18 @@ pub fn renderFinish(window: *Window) void {
         const easing = animationEasingFromProtocol(window.rendering_requested.animation_easing, .ease_out);
         if (open_intent == .deck_in_right) {
             // Deck-switch IN from the right + fade + traveling clip (no clip for right entering).
-            const dx: f32 = @as(f32, @floatFromInt(window.box.width)) * 0.30;
+            const dx: f32 = @as(f32, @floatFromInt(window.box.width)) * deck_in_dx_frac;
             const dx_i: i32 = @intFromFloat(@round(dx));
-            window.anim = Animation.armDeckIn(window.box.x, window.box.y, dx, 200, .ease_out);
+            window.anim = Animation.armDeckIn(window.box.x, window.box.y, dx, deck_in_anim_ms, .ease_out);
             window.tree.node.setPosition(window.box.x + dx_i, window.box.y);
             window.popup_tree.node.setPosition(window.box.x + dx_i, window.box.y);
-            log.info("[ANIM-DIAG]   -> armed DECK-IN right (slide+fade, dx={d:.2})", .{dx});
         } else if (open_intent == .deck_in_left) {
             // Deck-switch IN from the left - fade + traveling clip.
-            const dx: f32 = -@as(f32, @floatFromInt(window.box.width)) * 0.30;
+            const dx: f32 = -@as(f32, @floatFromInt(window.box.width)) * deck_in_dx_frac;
             const dx_i: i32 = @intFromFloat(@round(dx));
-            window.anim = Animation.armDeckIn(window.box.x, window.box.y, dx, 200, .ease_out);
+            window.anim = Animation.armDeckIn(window.box.x, window.box.y, dx, deck_in_anim_ms, .ease_out);
             window.tree.node.setPosition(window.box.x + dx_i, window.box.y);
             window.popup_tree.node.setPosition(window.box.x + dx_i, window.box.y);
-            log.info("[ANIM-DIAG]   -> armed DECK-IN left (slide+fade+clip, dx={d:.2})", .{dx});
         } else {
             // slide_in: group-open entrance. -45% solid slide, no clip.
             const dx: f32 = @as(f32, @floatFromInt(window.box.width)) * slide_in_frac;
@@ -1279,7 +1272,6 @@ pub fn renderFinish(window: *Window) void {
             window.anim.?.is_entrance_slide = true;
             window.tree.node.setPosition(start_x, window.box.y);
             window.popup_tree.node.setPosition(start_x, window.box.y);
-            log.info("[ANIM-DIAG]   -> armed SLIDE (group-open entrance, no clip)", .{});
         }
         Animation.scheduleAllOutputFrames();
         window.rendering_requested.animation_intent = 0;
@@ -1349,7 +1341,6 @@ pub fn renderFinish(window: *Window) void {
             ease,
         );
         window.anim.?.clip_reveal = clip_reveal;
-        log.info("[ANIM-DIAG]   -> armed MOVE (intent={s} clip_reveal={})", .{ AnimIntent.intentName(open_intent), clip_reveal });
         if (preserve) {
             window.anim.?.preserve_scale_xy = true;
         }
@@ -1374,16 +1365,13 @@ pub fn renderFinish(window: *Window) void {
         window.tree.node.setPosition(window.box.x, window.box.y);
         window.popup_tree.node.setPosition(window.box.x, window.box.y);
         Animation.scheduleAllOutputFrames();
-        log.info("[ANIM-DIAG]   -> armed NUDGE (focus_gained)", .{});
     } else if (window.anim != null) {
         // No geometry change in THIS render sequence, but an animation is in
         // flight. renderFinish runs on every render sequence (focus changes,
         // manage_dirty, etc.), not just on geometry changes — so clearing the
         // animation here would kill any in-flight fade/move after a single tick.
         // Leave it running; the frame loop owns the node position until it ends.
-        log.info("[ANIM-DIAG]   -> NO-OP (anim in flight, kept)", .{});
     } else {
-        log.info("[ANIM-DIAG]   -> SNAP (no anim, instant setPosition)", .{});
         window.tree.node.setPosition(window.box.x, window.box.y);
         window.popup_tree.node.setPosition(window.box.x, window.box.y);
     }
@@ -1602,19 +1590,8 @@ pub fn unmap(window: *Window) void {
     // Snapshot the window's current buffers into a standalone, compositor-owned
     // tree and animate it out. This must run while the surface buffers are still
     // in the live tree (before save()/teardown). The orphan outlives this Window.
-    //
-    // P17 close matrix. The WM CANNOT reliably send a close intent for a
-    // client-initiated close: river unmaps and snapshots HERE, synchronously,
-    // before the river_window_v1.closed event ever reaches the WM (proved via
-    // harness — the WM only ever sends reflow intents for the SURVIVING windows,
-    // never a close intent for the one going away). So the compositor INFERS the
-    // direction from geometry, which is unambiguous because unmap is always a
-    // real close (never the hide/minimize ambiguity that blocks inference there):
-    //   - no other window left visible  -> solo close: fade + shrink in place
-    //   - this is the deck (x > 0)       -> slide one full width RIGHT (solid)
-    //   - this is main with a deck (x<=0)-> slide one full width LEFT (solid)
-    // A WM-sent intent, when present (e.g. a future WM-initiated close that does
-    // land in a render sequence), OVERRIDES the inference.
+    // The close direction is fully WM-declared (see the DECLARATIVE CLOSE note
+    // below) — the compositor no longer infers it from geometry.
     if (window.anim_positioned and window.wm_requested.fullscreen == null) {
         const AnimationIntent = @import("AnimationIntent.zig");
         // DECLARATIVE CLOSE (P-refactor): the close direction comes ONLY from the
@@ -1627,9 +1604,6 @@ pub fn unmap(window: *Window) void {
         // none), e.g. a window that closed before its first relayout.
         const close_intent: AnimationIntent.Intent =
             @enumFromInt(window.rendering_requested.close_intent);
-        log.info("[ANIM-DIAG] unmap win='{?s}' close_intent={s} anim_pos={} -> style below", .{
-            window.getTitle(), AnimationIntent.intentName(close_intent), window.anim_positioned,
-        });
         const style: Animation.CloseStyle = switch (close_intent) {
             .slide_deck_out => .slide_right,
             .slide_close => .slide_left,

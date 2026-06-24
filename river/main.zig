@@ -330,6 +330,23 @@ pub fn logFn(
 
     const now = util.msecTimestamp();
     const scope_name = @tagName(scope);
+
+    // Messages with arguments carry dynamic content (titles, coordinates, …).
+    // The dedup below keys only on the comptime format template, so two such
+    // messages look identical and all but the first would be silently dropped.
+    // Never dedup them: flush any pending static-repeat count first (so it is
+    // not lost), then always print. Dedup applies only to argument-less messages.
+    // `args` is an anonymous tuple struct; count its fields at comptime.
+    if (comptime @typeInfo(@TypeOf(args)).@"struct".fields.len > 0) {
+        if (last_log.count > 0) {
+            log.defaultLog(level, scope, "last message repeated {d} times", .{last_log.count});
+            last_log.count = 0;
+            last_log.last_ms = now;
+        }
+        log.defaultLog(level, scope, format, args);
+        return;
+    }
+
     const same = (last_log.format_ptr != 0 and
         @intFromPtr(format.ptr) == last_log.format_ptr and
         format.len == last_log.format_len and

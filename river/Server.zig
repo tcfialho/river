@@ -100,6 +100,11 @@ om: OutputManager,
 idle_inhibit_manager: IdleInhibitManager,
 lock_manager: LockManager,
 wm: WindowManager,
+
+/// In-flight orphan close animations (snapshots of windows fading/sliding out
+/// after their Window was torn down). Empty in steady state. Initialized in
+/// init() and drained in deinit() via Animation.destroyAllOrphans().
+orphans: wl.list.Head(Animation.OrphanClose, .link),
 xkb_bindings: XkbBindings,
 layer_shell: LayerShell,
 
@@ -189,6 +194,7 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
         .idle_inhibit_manager = undefined,
         .lock_manager = undefined,
         .wm = undefined,
+        .orphans = undefined,
         .xkb_bindings = undefined,
         .layer_shell = undefined,
     };
@@ -226,6 +232,7 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
     }
 
     try server.wm.init();
+    server.orphans.init();
     try server.xkb_bindings.init();
     try server.layer_shell.init();
     try server.scene.init();
