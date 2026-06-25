@@ -77,14 +77,19 @@ rendering_requested: struct {
 dirty_idle: ?*wl.EventSource = null,
 
 timeout: *wl.EventSource,
+lazy_coalesce_timer: *wl.EventSource,
+lazy_timer_armed: bool = false,
 
 pub fn init(wm: *WindowManager) !void {
     const event_loop = server.wl_server.getEventLoop();
     const timeout = try event_loop.addTimer(*WindowManager, handleTimeout, wm);
     errdefer timeout.remove();
 
+    const lazy_timer = try event_loop.addTimer(*WindowManager, handleLazyCoalesce, wm);
+    errdefer lazy_timer.remove();
+
     wm.* = .{
-        .global = try wl.Global.create(server.wl_server, river.WindowManagerV1, 5, *WindowManager, wm, bind),
+        .global = try wl.Global.create(server.wl_server, river.WindowManagerV1, 7, *WindowManager, wm, bind),
         .sent = .{
             .outputs = undefined,
             .seats = undefined,
@@ -93,6 +98,7 @@ pub fn init(wm: *WindowManager) !void {
             .list = undefined,
         },
         .timeout = timeout,
+        .lazy_coalesce_timer = lazy_timer,
     };
     wm.sent.outputs.init();
     wm.sent.seats.init();
@@ -106,6 +112,7 @@ fn handleServerDestroy(listener: *wl.Listener(*wl.Server), _: *wl.Server) void {
 
     wm.global.destroy();
     wm.timeout.remove();
+    wm.lazy_coalesce_timer.remove();
 }
 
 fn bind(client: *wl.Client, wm: *WindowManager, version: u32, id: u32) void {
@@ -239,12 +246,26 @@ pub fn ensureRendering(wm: *WindowManager) bool {
 
 pub fn dirtyWindowing(wm: *WindowManager) void {
     wm.scheduled.dirty = true;
+    wm.cancelLazyTimer();
     wm.addDirtyIdle();
 }
 
 pub fn dirtyWindowingLazy(wm: *WindowManager) void {
     wm.scheduled.dirty_lazy = true;
-    wm.addDirtyIdle();
+    if (wm.scheduled.dirty or wm.rendering_scheduled.dirty) {
+        wm.addDirtyIdle();
+    } else if (wm.anySeatInOpMode()) {
+        wm.addDirtyIdle();
+    } else {
+        if (!wm.lazy_timer_armed) {
+            wm.lazy_coalesce_timer.timerUpdate(8) catch |err| {
+                log.err("failed to arm lazy coalesce timer: {}", .{err});
+                wm.addDirtyIdle();
+                return;
+            };
+            wm.lazy_timer_armed = true;
+        }
+    }
 }
 
 pub fn cleanWindowing(wm: *WindowManager) void {
@@ -254,6 +275,7 @@ pub fn cleanWindowing(wm: *WindowManager) void {
 
 pub fn dirtyRendering(wm: *WindowManager) void {
     wm.rendering_scheduled.dirty = true;
+    wm.cancelLazyTimer();
     wm.addDirtyIdle();
 }
 
@@ -396,6 +418,36 @@ fn cancelTimeoutTimer(wm: *WindowManager) void {
     wm.timeout.timerUpdate(0) catch log.err("error disarming timer", .{});
 }
 
+fn cancelLazyTimer(wm: *WindowManager) void {
+    if (wm.lazy_timer_armed) {
+        wm.lazy_coalesce_timer.timerUpdate(0) catch log.err("error disarming lazy timer", .{});
+        wm.lazy_timer_armed = false;
+    }
+}
+
+fn anySeatInOpMode(wm: *WindowManager) bool {
+    _ = wm;
+    var it = server.input_manager.seats.iterator(.forward);
+    while (it.next()) |seat| {
+        if (seat.cursor.mode == .op) return true;
+    }
+    return false;
+}
+
+fn handleLazyCoalesce(wm: *WindowManager) c_int {
+    wm.lazy_timer_armed = false;
+    if (wm.scheduled.dirty_lazy and !wm.scheduled.dirty and !wm.rendering_scheduled.dirty) {
+        if (wm.state == .idle) {
+            wm.scheduled.dirty = true;
+            wm.scheduled.dirty_lazy = false;
+            wm.manageStart();
+        } else {
+            wm.addDirtyIdle();
+        }
+    }
+    return 0;
+}
+
 fn handleTimeout(wm: *WindowManager) c_int {
     switch (wm.state) {
         .inflight_configures => {
@@ -489,22 +541,25 @@ fn renderFinish(wm: *WindowManager) void {
     //
     // TODO(wlroots) provide a way to batch changes to the scene graph.
     const new_order_hash = blk: {
-        var hash = std.crypto.hash.Blake3.init(.{});
+        // The render order only needs a cheap, non-cryptographic fingerprint to
+        // detect reordering between commits — Blake3 is overkill here. FNV-1a
+        // over the same per-node identity bytes is plenty and avoids pulling a
+        // crypto hash into the per-commit hot path.
+        var hash_val: u64 = 14695981039346656037; // FNV-1a 64-bit offset basis
+        const prime: u64 = 1099511628211; // FNV-1a 64-bit prime
         var it = wm.rendering_requested.list.iterator(.forward);
         while (it.next()) |node| {
             switch (node.get()) {
                 .window => |window| {
-                    hash.update(@ptrCast(&window.ref));
-                    hash.update(&.{@intFromBool(renderedFullscreen(window))});
+                    hash_val = (hash_val ^ @as(u64, @bitCast(window.ref))) *% prime;
+                    hash_val = (hash_val ^ @as(u64, @intFromBool(renderedFullscreen(window)))) *% prime;
                 },
                 .shell_surface => |shell_surface| {
-                    hash.update(@ptrCast(&shell_surface));
+                    hash_val = (hash_val ^ @intFromPtr(shell_surface)) *% prime;
                 },
             }
         }
-        var final: u64 = undefined;
-        hash.final(@ptrCast(&final));
-        break :blk final;
+        break :blk hash_val;
     };
 
     {
