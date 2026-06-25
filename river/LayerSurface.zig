@@ -33,12 +33,26 @@ ref: Ref,
 wlr_layer_surface: *wlr.LayerSurfaceV1,
 scene_layer_surface: *wlr.SceneLayerSurfaceV1,
 popup_tree: *wlr.SceneTree,
+last_applied: ?AppliedState = null,
 
 destroy: wl.Listener(*wlr.LayerSurfaceV1) = wl.Listener(*wlr.LayerSurfaceV1).init(handleDestroy),
 map: wl.Listener(void) = wl.Listener(void).init(handleMap),
 unmap: wl.Listener(void) = wl.Listener(void).init(handleUnmap),
 commit: wl.Listener(*wlr.Surface) = wl.Listener(*wlr.Surface).init(handleCommit),
 new_popup: wl.Listener(*wlr.XdgPopup) = wl.Listener(*wlr.XdgPopup).init(handleNewPopup),
+
+pub const AppliedState = struct {
+    anchor: zwlr.LayerSurfaceV1.Anchor,
+    exclusive_zone: i32,
+    margin_top: i32,
+    margin_right: i32,
+    margin_bottom: i32,
+    margin_left: i32,
+    desired_width: u32,
+    desired_height: u32,
+    layer: zwlr.LayerShellV1.Layer,
+    keyboard_interactive: zwlr.LayerSurfaceV1.KeyboardInteractivity,
+};
 
 pub fn create(wlr_layer_surface: *wlr.LayerSurfaceV1) error{OutOfMemory}!void {
     const layer_surface = try util.gpa.create(LayerSurface);
@@ -163,11 +177,30 @@ fn handleCommit(listener: *wl.Listener(*wlr.Surface), _: *wlr.Surface) void {
     if (wlr_layer_surface.initial_commit or
         @as(u32, @bitCast(wlr_layer_surface.current.committed)) != 0)
     {
-        // Beware: it is possible for arrange() to destroy this LayerSurface!
-        const output: *Output = @ptrCast(@alignCast(layer_surface.wlr_layer_surface.output.?.data));
-        output.layer_shell.arrange();
-        server.layer_shell.checkExclusiveFocus();
-        server.wm.dirtyWindowing();
+        const current = &wlr_layer_surface.current;
+        const cur_state = AppliedState{
+            .anchor = current.anchor,
+            .exclusive_zone = current.exclusive_zone,
+            .margin_top = current.margin.top,
+            .margin_right = current.margin.right,
+            .margin_bottom = current.margin.bottom,
+            .margin_left = current.margin.left,
+            .desired_width = current.desired_width,
+            .desired_height = current.desired_height,
+            .layer = current.layer,
+            .keyboard_interactive = current.keyboard_interactive,
+        };
+
+        const changed = layer_surface.last_applied == null or !std.meta.eql(layer_surface.last_applied.?, cur_state);
+        layer_surface.last_applied = cur_state;
+
+        if (changed) {
+            // Beware: it is possible for arrange() to destroy this LayerSurface!
+            const output: *Output = @ptrCast(@alignCast(layer_surface.wlr_layer_surface.output.?.data));
+            output.layer_shell.arrange();
+            server.layer_shell.checkExclusiveFocus();
+            server.wm.dirtyWindowing();
+        }
     }
 }
 

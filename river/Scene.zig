@@ -35,6 +35,11 @@ layers: struct {
     bottom: *wlr.SceneTree,
     /// Windows and shell surfaces of the window manager
     wm: *wlr.SceneTree,
+    /// Close animations: orphaned snapshots of windows fading out. Sits above
+    /// `wm` so the fade is not occluded by a window the WM raises into the same
+    /// slot (e.g. the deck window promoted when the visible one closes), but
+    /// below `top` so it never paints over the bar.
+    close_overlay: *wlr.SceneTree,
     /// Top layer shell layer
     top: *wlr.SceneTree,
     /// Fullscreen windows and river shell surfaces placed above them.
@@ -76,6 +81,7 @@ pub fn init(scene: *Scene) !void {
             .background = try normal_tree.createSceneTree(),
             .bottom = try normal_tree.createSceneTree(),
             .wm = try normal_tree.createSceneTree(),
+            .close_overlay = try normal_tree.createSceneTree(),
             .top = try normal_tree.createSceneTree(),
             .fullscreen = try normal_tree.createSceneTree(),
             .overlay = try normal_tree.createSceneTree(),
