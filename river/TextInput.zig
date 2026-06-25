@@ -49,7 +49,7 @@ fn handleEnable(listener: *wl.Listener(void)) void {
     const seat: *Seat = @ptrCast(@alignCast(text_input.wlr_text_input.seat.data));
 
     if (text_input.wlr_text_input.focused_surface == null) {
-        log.err("client requested to enable text input without focus, ignoring request", .{});
+        log.debug("client requested to enable text input without focus, ignoring request", .{});
         return;
     }
 
@@ -76,7 +76,7 @@ fn handleCommit(listener: *wl.Listener(void)) void {
     const seat: *Seat = @ptrCast(@alignCast(text_input.wlr_text_input.seat.data));
 
     if (seat.relay.text_input != text_input) {
-        log.err("inactive text input tried to commit an update, client bug?", .{});
+        log.debug("inactive text input tried to commit an update, client bug?", .{});
         return;
     }
 

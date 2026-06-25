@@ -44,6 +44,8 @@ configure_state: union(enum) {
     timed_out_acked,
 } = .idle,
 
+last_clip_geometry: ?wlr.Box = null,
+
 // Listeners that are always active over the window's lifetime
 destroy: wl.Listener(void) = .init(handleDestroy),
 ack_configure: wl.Listener(*wlr.XdgSurface.Configure) = .init(handleAckConfigure),
@@ -321,7 +323,22 @@ fn handleCommit(listener: *wl.Listener(*wlr.Surface), _: *wlr.Surface) void {
     const window = toplevel.window;
 
     // NB: the subsurface tree is never empty here
-    window.capture_scene.tree.node.subsurfaceTreeSetClip(&toplevel.wlr_toplevel.base.geometry);
+    const capture_active = window.wm_scheduled.capture_session_count > 0 or window.wm_sent.capture_session_count > 0;
+    if (capture_active) {
+        const geom = toplevel.wlr_toplevel.base.geometry;
+        const clip_changed = toplevel.last_clip_geometry == null or
+            toplevel.last_clip_geometry.?.x != geom.x or
+            toplevel.last_clip_geometry.?.y != geom.y or
+            toplevel.last_clip_geometry.?.width != geom.width or
+            toplevel.last_clip_geometry.?.height != geom.height;
+
+        if (clip_changed) {
+            window.capture_scene.tree.node.subsurfaceTreeSetClip(&geom);
+            toplevel.last_clip_geometry = geom;
+        }
+    } else {
+        toplevel.last_clip_geometry = null;
+    }
 
     window.setDimensionsHint(.{
         .min_width = @intCast(toplevel.wlr_toplevel.current.min_width),
@@ -460,8 +477,14 @@ fn handleRequestResize(listener: *wl.Listener(*wlr.XdgToplevel.event.Resize), ev
     }
 }
 
-fn handleSetParent(_: *wl.Listener(void)) void {
-    server.wm.dirtyWindowing();
+fn handleSetParent(listener: *wl.Listener(void)) void {
+    const toplevel: *XdgToplevel = @fieldParentPtr("set_parent", listener);
+    const window = toplevel.window;
+    const current_parent = window.getParent();
+    const sent_parent = if (window.wm_sent.parent) |p| p.get() else null;
+    if (current_parent != sent_parent) {
+        server.wm.dirtyWindowingLazy();
+    }
 }
 
 /// Called when the client sets / updates its title
