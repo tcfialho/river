@@ -21,10 +21,7 @@ pub fn build(b: *Build) !void {
     const pie = b.option(bool, "pie", "Build a Position Independent Executable") orelse false;
     const use_llvm = b.option(bool, "llvm", "Force use of Zig's LLVM backend and the lld linker");
 
-    const omit_frame_pointer = switch (optimize) {
-        .Debug, .ReleaseSafe => false,
-        .ReleaseFast, .ReleaseSmall => true,
-    };
+    const omit_frame_pointer = false;
 
     const man_pages = b.option(
         bool,
@@ -41,7 +38,7 @@ pub fn build(b: *Build) !void {
         bool,
         "xwayland",
         "Set to true to enable xwayland support",
-    ) orelse false;
+    ) orelse true;
 
     const full_version = blk: {
         if (b.option([]const u8, "version-string", "Override `river -version` output.")) |version_override| {
@@ -123,7 +120,7 @@ pub fn build(b: *Build) !void {
     scanner.generate("wp_color_manager_v1", 2);
     scanner.generate("wp_color_representation_manager_v1", 1);
 
-    scanner.generate("river_window_manager_v1", 5);
+    scanner.generate("river_window_manager_v1", 7);
     scanner.generate("river_xkb_bindings_v1", 3);
     scanner.generate("river_layer_shell_v1", 1);
     scanner.generate("river_input_manager_v1", 2);
@@ -184,6 +181,13 @@ pub fn build(b: *Build) !void {
         river.root_module.linkSystemLibrary(wlroots_pkgconf, .{});
         river.root_module.linkSystemLibrary("xkbcommon", .{});
         river.root_module.linkSystemLibrary("pixman-1", .{});
+        river.root_module.linkSystemLibrary("mimalloc", .{});
+
+        // Prefer libraries installed next to the binary (e.g. the locally
+        // patched wlroots in ~/.local/lib when river lives in ~/.local/bin)
+        // over the system ones, without leaking environment variables to
+        // child processes the way LD_LIBRARY_PATH would.
+        river.root_module.addRPathSpecial("$ORIGIN/../lib");
 
         river.root_module.addImport("wayland", wayland);
         river.root_module.addImport("xkbcommon", xkbcommon);
@@ -195,11 +199,27 @@ pub fn build(b: *Build) !void {
 
         river.root_module.addCSourceFile(.{
             .file = b.path("river/wlroots_log_wrapper.c"),
-            .flags = &.{ "-std=c99", "-O2" },
+            .flags = &.{
+                "-std=c99",
+                "-O3",
+                "-march=native",
+                "-mtune=native",
+                "-mavx2",
+                "-mfma",
+                "-fno-semantic-interposition",
+                "-falign-functions=32",
+                "-finline-limit=4000",
+                "-fprefetch-loop-arrays",
+                "-fno-math-errno",
+            },
         });
 
         river.pie = pie;
         river.root_module.omit_frame_pointer = omit_frame_pointer;
+        river.link_gc_sections = false;
+        river.link_emit_relocs = true;
+        river.link_z_relro = true;
+        river.link_z_lazy = false;
 
         b.installArtifact(river);
     }

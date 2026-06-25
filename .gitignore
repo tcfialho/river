@@ -4,3 +4,15 @@
 .zig-cache/
 zig-out/
 zig-pkg/
+
+# Local profiling / BOLT artifacts — never commit (accidentally tracked in
+# "Tier 2 Phase 1" commit 6ae1633; untracked 2026-06-21).
+perf_river.data
+perf_river.data.old
+*.fdata
+*.bolt
+build.zig.bak
+bolt-artifacts/
+
+# Local optimization helper script — not part of upstream build.
+optimize.sh
