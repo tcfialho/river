@@ -18,6 +18,7 @@ const river = wayland.server.river;
 const server = &@import("main.zig").server;
 const util = @import("util.zig");
 
+const Animation = @import("Animation.zig");
 const LayerShellOutput = @import("LayerShellOutput.zig");
 const LockSurface = @import("LockSurface.zig");
 const SceneNodeData = @import("SceneNodeData.zig");
@@ -133,6 +134,12 @@ const RenderingState = struct {
     };
 };
 
+/// After this many consecutive tearing page-flip test failures, stop testing
+/// for tearing_retry_cooldown_frames frames before trying again.
+const tearing_failure_limit = 10;
+const tearing_retry_cooldown_frames = 120;
+const scanout_log_cooldown_frames = 120;
+
 /// Set to null when the wlr_output is destroyed.
 wlr_output: ?*wlr.Output,
 scene_output: ?*wlr.SceneOutput,
@@ -175,6 +182,21 @@ rendering_requested: RenderingState = .init,
 /// State applied to the wlr_output and rendered.
 current: State,
 rendering_current: RenderingState = .init,
+/// Backoff state for the tearing page-flip hardware test (see renderAndCommit).
+/// Avoids running wlr_output.testState() with tearing_page_flip on every frame
+/// when it consistently fails (resolves the per-frame-test TODO below), and
+/// caches a recent success so a known-good output skips the test for a while.
+tearing_test_failures: u8 = 0,
+tearing_test_cooldown: u8 = 0,
+direct_scanout_logged: bool = false,
+direct_scanout_log_cooldown: u8 = 0,
+direct_scanout_log_suppressed: u16 = 0,
+zero_copy_logged: bool = false,
+zero_copy_log_cooldown: u8 = 0,
+zero_copy_log_suppressed: u16 = 0,
+tearing_test_succeeded: bool = false,
+last_direct_scanout: bool = false,
+tearing_test_frame_counter: u8 = 0,
 
 destroy: wl.Listener(*wlr.Output) = .init(handleDestroy),
 request_state: wl.Listener(*wlr.Output.event.RequestState) = .init(handleRequestState),
@@ -448,38 +470,122 @@ fn handleRequestState(listener: *wl.Listener(*wlr.Output.event.RequestState), ev
 fn handleFrame(listener: *wl.Listener(*wlr.Output), wlr_output: *wlr.Output) void {
     const output: *Output = @fieldParentPtr("frame", listener);
 
+    var now = util.timestamp();
+
+    // Advance MainDeck animations before rendering, so the scene-node mutations
+    // (position/opacity) register damage and are picked up by this same frame.
+    // Drive re-scheduling off our own active flag, independent of needsFrame().
+    const now_ns = @as(i64, now.sec) * std.time.ns_per_s + @as(i64, now.nsec);
+    // Window position/open animations and orphan close animations share the loop.
+    const windows_active = advanceAnimations(now_ns);
+    const orphans_active = Animation.advanceOrphans(now_ns);
+    const anim_active = windows_active or orphans_active;
+
     // TODO this should probably be retried on failure
-    output.renderAndCommit() catch |err| switch (err) {
+    // While animating, force a commit even if the scene reports no damage: a
+    // tick that samples the same integer position produces no damage, and
+    // without a commit the frame callback is never re-armed (wlr_output_schedule
+    // _frame is a no-op while a frame is pending), so the loop would stall after
+    // one frame. Committing every animating frame keeps the callback cycle alive.
+    output.renderAndCommit(anim_active) catch |err| switch (err) {
         error.CommitFailed => log.err("output commit failed for {s}", .{wlr_output.name}),
     };
 
-    var now = util.timestamp();
     output.scene_output.?.sendFrameDone(&now);
+
+    // Keep the loop alive only while something is animating; stop the instant it
+    // is not (so the compositor returns to idle and does not spin at refresh).
+    if (anim_active) wlr_output.scheduleFrame();
 }
 
-fn renderAndCommit(output: *Output) !void {
-    if (!output.scene_output.?.needsFrame()) return;
+fn renderAndCommit(output: *Output, force: bool) !void {
+    if (!force and !output.scene_output.?.needsFrame()) return;
 
     const wlr_output = output.wlr_output.?;
+    const scene_output = output.scene_output.?;
 
     var state = wlr.Output.State.init();
     defer state.finish();
 
     output.current.applyNoModeset(&state);
 
-    if (!output.scene_output.?.buildState(&state, null)) return error.CommitFailed;
+    if (!scene_output.buildState(&state, null)) return error.CommitFailed;
 
     if (output.rendering_current.tearing) {
-        state.tearing_page_flip = true;
-        // TODO don't try this every frame if it consistently fails. Stop trying if it fails
-        // for 10 frames in a row or something.
-        if (!wlr_output.testState(&state)) {
-            log.info("tearing page flip test failed for {s}, retrying without tearing", .{wlr_output.name});
-            state.tearing_page_flip = false;
+        // Don't run the tearing page-flip test on every frame. The hardware test
+        // (testState with tearing_page_flip) is not free, and on outputs where
+        // tearing is not currently possible — e.g. direct scanout is not active —
+        // it fails every frame. Back off after a run of failures, and once a test
+        // succeeds, trust it for a while instead of re-testing each frame.
+        const cur_scanout = scene_output.private.prev_scanout;
+        if (cur_scanout != output.last_direct_scanout) {
+            // Scanout state changed: a cached success/failure no longer applies,
+            // and we should re-evaluate immediately rather than wait out a
+            // cooldown that was started under the old scanout state.
+            output.tearing_test_succeeded = false;
+            output.tearing_test_failures = 0;
+            output.tearing_test_cooldown = 0;
+            output.last_direct_scanout = cur_scanout;
         }
+
+        if (output.tearing_test_cooldown > 0) {
+            output.tearing_test_cooldown -= 1;
+        } else {
+            state.tearing_page_flip = true;
+            if (output.tearing_test_succeeded) {
+                // Recently succeeded: skip the test, but re-test periodically.
+                output.tearing_test_frame_counter +%= 1;
+                if (output.tearing_test_frame_counter >= tearing_retry_cooldown_frames) {
+                    output.tearing_test_succeeded = false;
+                }
+            } else if (!wlr_output.testState(&state)) {
+                state.tearing_page_flip = false;
+                output.tearing_test_failures +|= 1;
+                if (output.tearing_test_failures >= tearing_failure_limit) {
+                    output.tearing_test_failures = 0;
+                    output.tearing_test_cooldown = tearing_retry_cooldown_frames;
+                    log.info("tearing page flip test failed repeatedly for {s}, cooling down retries", .{wlr_output.name});
+                } else {
+                    log.info("tearing page flip test failed for {s}, retrying without tearing", .{wlr_output.name});
+                }
+            } else {
+                output.tearing_test_failures = 0;
+                output.tearing_test_succeeded = true;
+                output.tearing_test_frame_counter = 0;
+            }
+        }
+    } else {
+        output.tearing_test_failures = 0;
+        output.tearing_test_cooldown = 0;
+        output.tearing_test_succeeded = false;
+        output.tearing_test_frame_counter = 0;
     }
 
-    if (!wlr_output.commitState(&state)) return error.CommitFailed;
+    const direct_scanout = scene_output.private.prev_scanout;
+    const direct_scanout_allowed = wlr_output.isDirectScanoutAllowed();
+    const committed_buffer = state.committed.buffer and state.buffer != null;
+    if (!wlr_output.commitState(&state)) {
+        // A commit that we attempted with tearing_page_flip and that failed is
+        // evidence the tearing path is not currently viable: feed it back into
+        // the backoff (drop the cached success and count it as a failure, arming
+        // the cooldown if we hit the limit) so we stop attempting it every frame.
+        output.tearing_test_succeeded = false;
+        if (state.tearing_page_flip) {
+            output.tearing_test_failures +|= 1;
+            if (output.tearing_test_failures >= tearing_failure_limit) {
+                output.tearing_test_failures = 0;
+                output.tearing_test_cooldown = tearing_retry_cooldown_frames;
+            }
+        }
+        return error.CommitFailed;
+    }
+    output.logDirectScanoutTransition(
+        wlr_output,
+        direct_scanout,
+        direct_scanout_allowed,
+        committed_buffer,
+        state.tearing_page_flip,
+    );
 
     switch (server.lock_manager.state) {
         .unlocked => {
@@ -521,6 +627,91 @@ fn renderAndCommit(output: *Output) !void {
     }
 }
 
+/// Advance every in-flight window animation to time `now_ns` and apply the
+/// interpolated position/opacity to the scene nodes. Finished animations are
+/// snapped to their target and cleared. Returns true if any animation is still
+/// active (the caller should schedule another frame). Time-based, so calling it
+/// from several outputs in the same vblank just recomputes the same sample.
+pub fn advanceAnimations(now_ns: i64) bool {
+    var any_active = false;
+    var it = server.wm.windows.iterator();
+    while (it.next()) |window| {
+        const anim = &(window.anim orelse continue);
+        const finished = anim.done(now_ns);
+        const s = anim.sample(now_ns);
+
+        // Base position: sampled while animating, snapped to the logical target
+        // in window.box on finish.
+        const base_x = if (finished) window.box.x else s.x;
+        const base_y = if (finished) window.box.y else s.y;
+
+        // Scale (around center): compose the uniform pop with the per-axis size
+        // tween. Returns the recenter offset for the window tree node; popups
+        // never scale, so they stay at the un-offset base position. On finish,
+        // both land on 1.0 and natural size is restored.
+        var off_x: i32 = 0;
+        var off_y: i32 = 0;
+        if (anim.clip_reveal) {
+            // Lone-window grow: reveal via a growing clip, never a texture scale,
+            // so the content is not distorted. On finish, clear the clip so the
+            // full surface shows.
+            if (finished) {
+                Animation.clearClipReveal(window.surfaces.tree);
+            } else {
+                Animation.applyClipReveal(window.surfaces.tree, s.fx, window.box.width, window.box.height);
+            }
+        } else if (anim.scales() or anim.resizes()) {
+            const fx: f32 = if (finished) anim.target_scale else s.scale * s.fx;
+            const fy: f32 = if (finished) anim.target_scale else s.scale * s.fy;
+            const r = Animation.applyScaleXY(&window.surfaces.tree.node, fx, fy, window.box.width, window.box.height);
+            off_x = r.dx;
+            off_y = r.dy;
+            // Minimize/unminimize: scale origin at the BOTTOM center, not the
+            // center. applyScaleXY recentered around center (dy = (1-fy)*h/2);
+            // override to (1-fy)*h so the window shrinks toward its bottom edge
+            // (toward the taskbar) and grows back up from it. P10 origin.
+            if (anim.scale_origin_bottom and !finished) {
+                const h_f: f32 = @floatFromInt(window.box.height);
+                off_y = @intFromFloat(@round((1.0 - fy) * h_f));
+            }
+        }
+
+        // Deck-switch IN traveling clip (P2.3 p9DeckInLeft/Right): pin the visible
+        // left border at the main<->deck division while the window glides in, so it
+        // does not appear to cross over the main slot. The clip left edge travels
+        // from clip_travel_x (at progress 0) to 0 (at progress 1). Cleared on finish.
+        if (anim.clip_travel) {
+            if (finished) {
+                Animation.clearClipReveal(window.surfaces.tree);
+            } else {
+                const p = anim.progress(now_ns);
+                const clip_x_f: f32 = anim.clip_travel_x * (1.0 - p);
+                const clip_x: i32 = @intFromFloat(@round(clip_x_f));
+                const clip: wlr.Box = .{ .x = clip_x, .y = 0, .width = window.box.width, .height = window.box.height };
+                window.surfaces.tree.node.subsurfaceTreeSetClip(&clip);
+            }
+        }
+
+        window.tree.node.setPosition(base_x + off_x, base_y + off_y);
+        window.popup_tree.node.setPosition(base_x, base_y);
+
+        // Opacity: apply whenever the animation actually changes opacity (gated on
+        // the endpoints, not the kind — a move that interrupts a fade still fades).
+        // Pure moves (1.0 -> 1.0) skip the per-buffer walk.
+        if (anim.fades()) {
+            const opacity: f32 = if (finished) anim.target_opacity else s.opacity;
+            Animation.applyOpacity(&window.surfaces.tree.node, opacity);
+        }
+
+        if (finished) {
+            window.anim = null;
+        } else {
+            any_active = true;
+        }
+    }
+    return any_active;
+}
+
 fn handlePresent(
     listener: *wl.Listener(*wlr.Output.event.Present),
     event: *wlr.Output.event.Present,
@@ -529,6 +720,7 @@ fn handlePresent(
     if (!event.presented) {
         return;
     }
+    output.logZeroCopyTransition(event.output, event.flags.zero_copy);
     switch (output.lock_render_state) {
         .pending_unlock => {
             assert(server.lock_manager.state != .locked);
@@ -549,4 +741,64 @@ fn handlePresent(
         },
         .blanked, .lock_surface => {},
     }
+}
+
+fn logDirectScanoutTransition(
+    output: *Output,
+    wlr_output: *wlr.Output,
+    active: bool,
+    allowed: bool,
+    committed_buffer: bool,
+    tearing: bool,
+) void {
+    if (output.direct_scanout_log_cooldown > 0) {
+        output.direct_scanout_log_cooldown -= 1;
+    }
+
+    if (output.direct_scanout_logged == active) return;
+
+    if (output.direct_scanout_log_cooldown > 0) {
+        output.direct_scanout_log_suppressed +|= 1;
+        return;
+    }
+
+    const suppressed = output.direct_scanout_log_suppressed;
+    output.direct_scanout_logged = active;
+    output.direct_scanout_log_suppressed = 0;
+    output.direct_scanout_log_cooldown = scanout_log_cooldown_frames;
+
+    if (active) {
+        log.info(
+            "direct scanout active on {s}: buffer={} tearing={} capture_sessions={} suppressed_changes={}",
+            .{ wlr_output.name, committed_buffer, tearing, output.current.capture_session_count, suppressed },
+        );
+    } else {
+        log.info(
+            "direct scanout inactive on {s}: allowed={} buffer={} capture_sessions={} suppressed_changes={}",
+            .{ wlr_output.name, allowed, committed_buffer, output.current.capture_session_count, suppressed },
+        );
+    }
+}
+
+fn logZeroCopyTransition(output: *Output, wlr_output: *wlr.Output, zero_copy: bool) void {
+    if (output.zero_copy_log_cooldown > 0) {
+        output.zero_copy_log_cooldown -= 1;
+    }
+
+    if (output.zero_copy_logged == zero_copy) return;
+
+    if (output.zero_copy_log_cooldown > 0) {
+        output.zero_copy_log_suppressed +|= 1;
+        return;
+    }
+
+    const suppressed = output.zero_copy_log_suppressed;
+    output.zero_copy_logged = zero_copy;
+    output.zero_copy_log_suppressed = 0;
+    output.zero_copy_log_cooldown = scanout_log_cooldown_frames;
+
+    log.debug(
+        "present zero-copy changed on {s}: zero_copy={} suppressed_changes={}",
+        .{ wlr_output.name, zero_copy, suppressed },
+    );
 }
