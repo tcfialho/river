@@ -16,6 +16,7 @@ const wp = wayland.server.wp;
 const util = @import("util.zig");
 
 const IdleInhibitManager = @import("IdleInhibitManager.zig");
+const Animation = @import("Animation.zig");
 const InputManager = @import("InputManager.zig");
 const LockManager = @import("LockManager.zig");
 const Output = @import("Output.zig");
@@ -99,6 +100,11 @@ om: OutputManager,
 idle_inhibit_manager: IdleInhibitManager,
 lock_manager: LockManager,
 wm: WindowManager,
+
+/// In-flight orphan close animations (snapshots of windows fading/sliding out
+/// after their Window was torn down). Empty in steady state. Initialized in
+/// init() and drained in deinit() via Animation.destroyAllOrphans().
+orphans: wl.list.Head(Animation.OrphanClose, .link),
 xkb_bindings: XkbBindings,
 layer_shell: LayerShell,
 
@@ -124,7 +130,8 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
 
     var session: ?*wlr.Session = undefined;
     const backend = try wlr.Backend.autocreate(loop, &session);
-    const renderer = try wlr.Renderer.autocreate(backend);
+    const renderer = try createRenderer(backend);
+    defer restoreEglVendorLibraries();
 
     const compositor = try wlr.Compositor.create(wl_server, 6, renderer);
 
@@ -187,6 +194,7 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
         .idle_inhibit_manager = undefined,
         .lock_manager = undefined,
         .wm = undefined,
+        .orphans = undefined,
         .xkb_bindings = undefined,
         .layer_shell = undefined,
     };
@@ -224,6 +232,7 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
     }
 
     try server.wm.init();
+    server.orphans.init();
     try server.xkb_bindings.init();
     try server.layer_shell.init();
     try server.scene.init();
@@ -244,6 +253,60 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
 
     wl_server.setGlobalFilter(*Server, globalFilter, server);
 }
+
+/// Prefer the Vulkan renderer over the wlroots default (GLES2) unless the user
+/// explicitly chose a renderer through the WLR_RENDERER environment variable.
+/// The NVIDIA driver busy-waits on the CPU for every EGL context switch and the
+/// GLES2 renderer switches contexts multiple times per frame and per client
+/// buffer import, which was measured to waste roughly 10x the CPU the Vulkan
+/// renderer needs for an identical workload.
+fn createRenderer(backend: *wlr.Backend) !*wlr.Renderer {
+    limitEglVendorLibraries();
+
+    if (getenv("WLR_RENDERER") != null) {
+        return wlr.Renderer.autocreate(backend);
+    }
+
+    _ = setenv("WLR_RENDERER", "vulkan", 1);
+    const vulkan = wlr.Renderer.autocreate(backend);
+    _ = unsetenv("WLR_RENDERER");
+
+    if (vulkan) |renderer| {
+        log.info("created vulkan renderer", .{});
+        return renderer;
+    } else |_| {
+        log.warn("failed to create vulkan renderer, falling back to wlroots default", .{});
+        return wlr.Renderer.autocreate(backend);
+    }
+}
+
+/// The NVIDIA GBM backend initializes EGL through glvnd, which enumerates and
+/// loads every installed vendor library including Mesa's, pulling gallium and
+/// LLVM (~9 MB PSS) into a process that only ever renders through the NVIDIA
+/// driver. Restricting enumeration to the NVIDIA ICD while the renderer and
+/// allocator initialize keeps those libraries out of the compositor without
+/// leaking the restriction to clients spawned afterwards.
+const nvidia_egl_vendor_json = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json";
+var egl_vendor_limited: bool = false;
+
+fn limitEglVendorLibraries() void {
+    if (getenv("__EGL_VENDOR_LIBRARY_FILENAMES") != null) return;
+    if (getenv("__EGL_VENDOR_LIBRARY_DIRS") != null) return;
+    if (access(nvidia_egl_vendor_json, 0) != 0) return;
+    _ = setenv("__EGL_VENDOR_LIBRARY_FILENAMES", nvidia_egl_vendor_json, 1);
+    egl_vendor_limited = true;
+}
+
+fn restoreEglVendorLibraries() void {
+    if (!egl_vendor_limited) return;
+    _ = unsetenv("__EGL_VENDOR_LIBRARY_FILENAMES");
+    egl_vendor_limited = false;
+}
+
+extern fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern fn unsetenv(name: [*:0]const u8) c_int;
+extern fn access(path: [*:0]const u8, mode: c_int) c_int;
 
 /// Free allocated memory and clean up. Note: order is important here
 pub fn deinit(server: *Server) void {
@@ -271,6 +334,10 @@ pub fn deinit(server: *Server) void {
     server.wl_server.destroyClients();
 
     server.backend.destroy();
+
+    // Free any in-flight orphan close animations (heap structs + their standalone
+    // scene trees) before tearing down the parent scene graph.
+    Animation.destroyAllOrphans();
 
     // The scene graph needs to be destroyed after the backend but before the renderer
     // Output destruction requires the scene graph to still be around while the scene
@@ -438,8 +505,9 @@ fn gpuResetRecoverIdle(server: *Server) void {
 
 fn gpuResetRecover(server: *Server) !void {
     log.info("recovering from GPU reset", .{});
-    const new_renderer = try wlr.Renderer.autocreate(server.backend);
+    const new_renderer = try createRenderer(server.backend);
     errdefer new_renderer.destroy();
+    defer restoreEglVendorLibraries();
 
     const new_allocator = try wlr.Allocator.autocreate(server.backend, new_renderer);
     errdefer comptime unreachable; // no failure allowed after this point
@@ -586,6 +654,11 @@ const CaptureSession = struct {
             while (it.next()) |window| {
                 if (session.wlr_capture_session.source == window.capture_source) {
                     window.wm_scheduled.capture_session_count -= 1;
+                    if (window.wm_scheduled.capture_session_count == 0) {
+                        if (window.impl == .toplevel) {
+                            window.impl.toplevel.last_clip_geometry = null;
+                        }
+                    }
                     break;
                 }
             } else unreachable;
@@ -625,6 +698,11 @@ fn handleNewCaptureSession(
         while (it.next()) |window| {
             if (wlr_capture_session.source == window.capture_source) {
                 window.wm_scheduled.capture_session_count += 1;
+                if (window.impl == .toplevel) {
+                    const toplevel = &window.impl.toplevel;
+                    window.capture_scene.tree.node.subsurfaceTreeSetClip(&toplevel.wlr_toplevel.base.geometry);
+                    toplevel.last_clip_geometry = toplevel.wlr_toplevel.base.geometry;
+                }
                 break;
             }
         } else unreachable;

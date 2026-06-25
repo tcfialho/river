@@ -307,6 +307,17 @@ pub const std_options: std.Options = .{
     .logFn = logFn,
 };
 
+const LastLog = struct {
+    format_ptr: usize = 0,
+    format_len: usize = 0,
+    scope_ptr: usize = 0,
+    scope_len: usize = 0,
+    level: log.Level = .info,
+    count: usize = 0,
+    last_ms: u32 = 0,
+};
+var last_log: LastLog = .{};
+
 pub fn logFn(
     comptime level: log.Level,
     comptime scope: @TypeOf(.EnumLiteral),
@@ -317,7 +328,52 @@ pub fn logFn(
 
     if (scope != .default and !log_scopes.contains(scope)) return;
 
-    log.defaultLog(level, scope, format, args);
+    const now = util.msecTimestamp();
+    const scope_name = @tagName(scope);
+
+    // Messages with arguments carry dynamic content (titles, coordinates, …).
+    // The dedup below keys only on the comptime format template, so two such
+    // messages look identical and all but the first would be silently dropped.
+    // Never dedup them: flush any pending static-repeat count first (so it is
+    // not lost), then always print. Dedup applies only to argument-less messages.
+    // `args` is an anonymous tuple struct; count its fields at comptime.
+    if (comptime @typeInfo(@TypeOf(args)).@"struct".fields.len > 0) {
+        if (last_log.count > 0) {
+            log.defaultLog(level, scope, "last message repeated {d} times", .{last_log.count});
+            last_log.count = 0;
+            last_log.last_ms = now;
+        }
+        log.defaultLog(level, scope, format, args);
+        return;
+    }
+
+    const same = (last_log.format_ptr != 0 and
+        @intFromPtr(format.ptr) == last_log.format_ptr and
+        format.len == last_log.format_len and
+        @intFromPtr(scope_name.ptr) == last_log.scope_ptr and
+        scope_name.len == last_log.scope_len and
+        level == last_log.level);
+
+    if (same) {
+        last_log.count += 1;
+        if (now -% last_log.last_ms >= 5000) {
+            log.defaultLog(level, scope, "last message repeated {d} times", .{last_log.count});
+            last_log.count = 0;
+            last_log.last_ms = now;
+        }
+    } else {
+        if (last_log.count > 0) {
+            log.defaultLog(level, scope, "last message repeated {d} times", .{last_log.count});
+        }
+        log.defaultLog(level, scope, format, args);
+        last_log.level = level;
+        last_log.format_ptr = @intFromPtr(format.ptr);
+        last_log.format_len = format.len;
+        last_log.scope_ptr = @intFromPtr(scope_name.ptr);
+        last_log.scope_len = scope_name.len;
+        last_log.count = 0;
+        last_log.last_ms = now;
+    }
 }
 
 /// See wlroots_log_wrapper.c
