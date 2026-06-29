@@ -322,6 +322,10 @@ fn handleCommit(listener: *wl.Listener(*wlr.Surface), _: *wlr.Surface) void {
     const toplevel: *XdgToplevel = @fieldParentPtr("commit", listener);
     const window = toplevel.window;
 
+    if (window.anim) |*anim| {
+        anim.single_buffer_resolved = false;
+    }
+
     // NB: the subsurface tree is never empty here
     const capture_active = window.wm_scheduled.capture_session_count > 0 or window.wm_sent.capture_session_count > 0;
     if (capture_active) {

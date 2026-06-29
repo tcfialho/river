@@ -658,12 +658,12 @@ pub fn advanceAnimations(now_ns: i64) bool {
             if (finished) {
                 Animation.clearClipReveal(window.surfaces.tree);
             } else {
-                Animation.applyClipReveal(window.surfaces.tree, s.fx, window.box.width, window.box.height);
+                Animation.applyClipReveal(anim, window.surfaces.tree, s.fx, window.box.width, window.box.height);
             }
         } else if (anim.scales() or anim.resizes()) {
             const fx: f32 = if (finished) anim.target_scale else s.scale * s.fx;
             const fy: f32 = if (finished) anim.target_scale else s.scale * s.fy;
-            const r = Animation.applyScaleXY(&window.surfaces.tree.node, fx, fy, window.box.width, window.box.height);
+            const r = Animation.applyScaleXY(anim, &window.surfaces.tree.node, fx, fy, window.box.width, window.box.height);
             off_x = r.dx;
             off_y = r.dy;
             // Minimize/unminimize: scale origin at the BOTTOM center, not the

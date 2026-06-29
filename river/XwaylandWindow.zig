@@ -44,6 +44,7 @@ request_minimize: wl.Listener(*wlr.XwaylandSurface.event.Minimize) = .init(handl
 // Active while the xsurface is associated with a wlr_surface
 map: wl.Listener(void) = .init(handleMap),
 unmap: wl.Listener(void) = .init(handleUnmap),
+commit: wl.Listener(*wlr.Surface) = .init(handleCommit),
 
 pub fn create(xsurface: *wlr.XwaylandSurface) error{OutOfMemory}!void {
     log.debug("new xwayland window: title='{?s}', class='{?s}'", .{
@@ -187,6 +188,8 @@ pub fn handleMap(listener: *wl.Listener(void)) void {
     const window = xwindow.window;
     const surface = xwindow.xsurface.surface.?;
 
+    surface.events.commit.add(&xwindow.commit);
+
     xwindow.surface_tree = window.surfaces.tree.createSceneSubsurfaceTree(surface) catch {
         log.err("out of memory", .{});
         surface.resource.getClient().postNoMemory();
@@ -215,6 +218,7 @@ pub fn handleMap(listener: *wl.Listener(void)) void {
 fn handleUnmap(listener: *wl.Listener(void)) void {
     const xwindow: *XwaylandWindow = @fieldParentPtr("unmap", listener);
 
+    xwindow.commit.link.remove();
     xwindow.xsurface.surface.?.data = null;
 
     xwindow.window.unmap();
@@ -297,8 +301,14 @@ fn handleSetClass(listener: *wl.Listener(void)) void {
     xwindow.window.notifyAppId();
 }
 
-fn handleSetParent(_: *wl.Listener(void)) void {
-    server.wm.dirtyWindowing();
+fn handleSetParent(listener: *wl.Listener(void)) void {
+    const xwindow: *XwaylandWindow = @fieldParentPtr("set_parent", listener);
+    const window = xwindow.window;
+    const current_parent = window.getParent();
+    const sent_parent = if (window.wm_sent.parent) |p| p.get() else null;
+    if (current_parent != sent_parent) {
+        server.wm.dirtyWindowingLazy();
+    }
 }
 
 fn handleSetDecorations(listener: *wl.Listener(void)) void {
@@ -343,4 +353,13 @@ fn handleRequestMinimize(
     xwindow.xsurface.setMinimized(event.minimize);
     xwindow.window.wm_scheduled.minimize_requested = true;
     server.wm.dirtyWindowing();
+}
+
+fn handleCommit(listener: *wl.Listener(*wlr.Surface), _: *wlr.Surface) void {
+    const xwindow: *XwaylandWindow = @fieldParentPtr("commit", listener);
+    const window = xwindow.window;
+
+    if (window.anim) |*anim| {
+        anim.single_buffer_resolved = false;
+    }
 }

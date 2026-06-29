@@ -65,11 +65,34 @@ pub const Easing = enum {
             .ease_out => 1.0 - (1.0 - t) * (1.0 - t),
             // Quadratic ease-in: gentle start, fast stop.
             .ease_in => t * t,
-            .spring => cubicBezierYForX(t, 0.22, 1.0, 0.36, 1.0),
-            .ease_in_out => cubicBezierYForX(t, 0.42, 0.0, 0.58, 1.0),
+            .spring => evaluateLUT(t, &spring_lut),
+            .ease_in_out => evaluateLUT(t, &ease_in_out_lut),
         };
     }
 };
+
+const spring_lut = precomputeLUT(0.22, 1.0, 0.36, 1.0);
+const ease_in_out_lut = precomputeLUT(0.42, 0.0, 0.58, 1.0);
+
+fn precomputeLUT(comptime p1x: f32, comptime p1y: f32, comptime p2x: f32, comptime p2y: f32) [257]f32 {
+    @setEvalBranchQuota(200000);
+    var lut: [257]f32 = undefined;
+    var i: usize = 0;
+    while (i <= 256) : (i += 1) {
+        const x = @as(f32, @floatFromInt(i)) / 256.0;
+        lut[i] = cubicBezierYForX(x, p1x, p1y, p2x, p2y);
+    }
+    return lut;
+}
+
+fn evaluateLUT(t: f32, lut: *const [257]f32) f32 {
+    if (!(t > 0.0)) return 0.0;
+    if (t >= 1.0) return 1.0;
+    const index_f = t * 256.0;
+    const index: usize = @min(@as(usize, @intFromFloat(index_f)), 255);
+    const fraction = index_f - @as(f32, @floatFromInt(index));
+    return lut[index] + fraction * (lut[index + 1] - lut[index]);
+}
 
 // Generic cubic-bezier(p1x, p1y, p2x, p2y) with implicit P0=(0,0), P3=(1,1).
 // For a given x (= normalized time t), solve x(u)=t for the bezier parameter u,
@@ -134,6 +157,10 @@ fn cubicBezierYForX(x: f32, p1x: f32, p1y: f32, p2x: f32, p2y: f32) f32 {
 
 kind: Kind,
 easing: Easing,
+
+// Cache fields to avoid walking the wlroots scene graph tree via singleBuffer every frame.
+single_buffer: ?*wlr.SceneBuffer = null,
+single_buffer_resolved: bool = false,
 
 /// Monotonic start time and total duration, in nanoseconds.
 start_ns: i64,
@@ -654,11 +681,22 @@ pub const ScaleResult = struct {
 /// always full. `frac` in (0,1]. The content is NOT scaled — it stays at its
 /// committed size, so there is no distortion. Pass frac >= 1.0 (or call
 /// clearClipReveal) to remove the clip. No-op if not a single-buffer surface.
-pub fn applyClipReveal(tree: *wlr.SceneTree, frac: f32, full_w: i32, full_h: i32) void {
+fn resolveSingle(anim: ?*Animation, node: *wlr.SceneNode) ?*wlr.SceneBuffer {
+    if (anim) |a| {
+        if (!a.single_buffer_resolved) {
+            a.single_buffer = singleBuffer(node);
+            a.single_buffer_resolved = true;
+        }
+        return a.single_buffer;
+    }
+    return singleBuffer(node);
+}
+
+pub fn applyClipReveal(anim: ?*Animation, tree: *wlr.SceneTree, frac: f32, full_w: i32, full_h: i32) void {
     var revealed: i32 = @intFromFloat(@round(@as(f32, @floatFromInt(full_w)) * frac));
     // Clamp to the buffer the client has actually committed: revealing past it
     // would expose an empty region (the "stripes on the right").
-    if (singleBuffer(&tree.node)) |buffer| {
+    if (resolveSingle(anim, &tree.node)) |buffer| {
         if (buffer.buffer) |buf| {
             if (revealed > buf.width) revealed = buf.width;
         }
@@ -683,7 +721,7 @@ pub fn clearClipReveal(tree: *wlr.SceneTree) void {
 /// pop (fx == fy) and the non-uniform size tween (fx != fy). Returns the
 /// recentering offset for the window tree node. No-op (applied=false) for
 /// multi-buffer windows or fx == fy == 1.0.
-pub fn applyScaleXY(node: *wlr.SceneNode, fx: f32, fy: f32, nat_w: i32, nat_h: i32) ScaleResult {
+pub fn applyScaleXY(anim: ?*Animation, node: *wlr.SceneNode, fx: f32, fy: f32, nat_w: i32, nat_h: i32) ScaleResult {
     if (fx == 1.0 and fy == 1.0) {
         // Restore AUTO sizing, not a fixed size. A scene_surface only re-tracks
         // the client's committed buffer size while dst is (0,0) — see wlroots
@@ -694,10 +732,10 @@ pub fn applyScaleXY(node: *wlr.SceneNode, fx: f32, fy: f32, nat_w: i32, nat_h: i
         // (the "stripes on the right") until a later render re-finishes. Passing
         // (0,0) re-enables auto-tracking so the new buffer is reflected the instant
         // it lands, no focus change needed. nat_w/nat_h are unused in this branch.
-        if (singleBuffer(node)) |buffer| buffer.setDestSize(0, 0);
+        if (resolveSingle(anim, node)) |buffer| buffer.setDestSize(0, 0);
         return .{ .dx = 0, .dy = 0, .applied = false };
     }
-    const buffer = singleBuffer(node) orelse return .{ .dx = 0, .dy = 0, .applied = false };
+    const buffer = resolveSingle(anim, node) orelse return .{ .dx = 0, .dy = 0, .applied = false };
     const fw: f32 = @as(f32, @floatFromInt(nat_w)) * fx;
     const fh: f32 = @as(f32, @floatFromInt(nat_h)) * fy;
     buffer.setDestSize(@intFromFloat(@round(fw)), @intFromFloat(@round(fh)));
@@ -707,8 +745,8 @@ pub fn applyScaleXY(node: *wlr.SceneNode, fx: f32, fy: f32, nat_w: i32, nat_h: i
 }
 
 /// Uniform convenience wrapper (pop): same factor on both axes.
-pub fn applyScale(node: *wlr.SceneNode, f: f32, nat_w: i32, nat_h: i32) ScaleResult {
-    return applyScaleXY(node, f, f, nat_w, nat_h);
+pub fn applyScale(anim: ?*Animation, node: *wlr.SceneNode, f: f32, nat_w: i32, nat_h: i32) ScaleResult {
+    return applyScaleXY(anim, node, f, f, nat_w, nat_h);
 }
 
 // ===========================================================================
@@ -834,6 +872,8 @@ pub fn spawnClose(
         .nat_w = nat_w,
         .nat_h = nat_h,
     };
+    orphan.anim.single_buffer = null;
+    orphan.anim.single_buffer_resolved = false;
     server.orphans.append(orphan);
 
     // unmap runs outside the frame loop, so kick a frame on every output to
@@ -883,6 +923,8 @@ pub fn spawnDeckOut(
         .nat_w = nat_w,
         .nat_h = nat_h,
     };
+    orphan.anim.single_buffer = null;
+    orphan.anim.single_buffer_resolved = false;
     server.orphans.append(orphan);
 
     scheduleAllOutputFrames();
@@ -931,6 +973,8 @@ pub fn spawnMinimize(
         .nat_w = nat_w,
         .nat_h = nat_h,
     };
+    orphan.anim.single_buffer = null;
+    orphan.anim.single_buffer_resolved = false;
     server.orphans.append(orphan);
 
     scheduleAllOutputFrames();
@@ -961,7 +1005,7 @@ pub fn advanceOrphans(now_ns: i64) bool {
         // For a slide, scale is 1.0 so applyScale is a no-op (r.dx = 0). The
         // sampled x/y carry the slide (start -> start+dx); the fade close keeps
         // s.x == orphan.x (armFade fixes target_x = x), so this also covers it.
-        const r = applyScale(&orphan.tree.node, s.scale, orphan.nat_w, orphan.nat_h);
+        const r = applyScale(&orphan.anim, &orphan.tree.node, s.scale, orphan.nat_w, orphan.nat_h);
         var oy: i32 = r.dy;
         // Minimize orphan: scale origin at the BOTTOM center, not the center, so
         // the shrink goes toward the bottom edge (toward the taskbar). Override
