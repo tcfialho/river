@@ -21,7 +21,7 @@ pub fn build(b: *Build) !void {
     const pie = b.option(bool, "pie", "Build a Position Independent Executable") orelse false;
     const use_llvm = b.option(bool, "llvm", "Force use of Zig's LLVM backend and the lld linker");
 
-    const omit_frame_pointer = false;
+    const omit_frame_pointer = true;
 
     const man_pages = b.option(
         bool,
@@ -202,14 +202,15 @@ pub fn build(b: *Build) !void {
             .flags = &.{
                 "-std=c99",
                 "-O3",
+                "-ffast-math",
                 "-march=native",
                 "-mtune=native",
                 "-mavx2",
                 "-mfma",
+                "-fstrict-aliasing",
+                "-fomit-frame-pointer",
                 "-fno-semantic-interposition",
                 "-falign-functions=32",
-                "-finline-limit=4000",
-                "-fprefetch-loop-arrays",
                 "-fno-math-errno",
             },
         });
