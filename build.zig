@@ -211,7 +211,11 @@ pub fn build(b: *Build) !void {
                 "-fomit-frame-pointer",
                 "-fno-semantic-interposition",
                 "-falign-functions=32",
+                "-ffp-contract=fast",
+                "-funroll-loops",
                 "-fno-math-errno",
+                "-mllvm",
+                "-inline-threshold=4000",
             },
         });
 
