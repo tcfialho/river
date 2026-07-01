@@ -105,6 +105,18 @@ wm: WindowManager,
 /// after their Window was torn down). Empty in steady state. Initialized in
 /// init() and drained in deinit() via Animation.destroyAllOrphans().
 orphans: wl.list.Head(Animation.OrphanClose, .link),
+
+/// Count of windows with a non-null `.anim`, kept in sync by Window.setAnim().
+/// Lets Output.advanceAnimations() skip the full window scan in the common
+/// steady-state case where nothing is animating.
+animating_window_count: u32 = 0,
+/// Timestamp (ns) and result of the last window/orphan animation tick actually
+/// computed. When several outputs fire `frame` for the same vblank instant,
+/// later ones reuse this instead of re-walking windows/orphans for an
+/// effectively identical `now_ns`. See Output.advanceAnimationsOnce().
+last_animation_tick_ns: i64 = 0,
+last_animation_tick_active: bool = false,
+
 xkb_bindings: XkbBindings,
 layer_shell: LayerShell,
 

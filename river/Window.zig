@@ -407,6 +407,11 @@ pub fn create(impl: Impl) error{OutOfMemory}!*Window {
 pub fn destroy(window: *Window) void {
     assert(window.impl == .destroying);
 
+    // Defensive: keep server.animating_window_count from leaking if a window
+    // is ever destroyed while window.anim != null (belt-and-suspenders, not
+    // known to be reachable given the .closing/.mapped asserts below).
+    window.setAnim(null);
+
     // Windows destroyed before they are ever mapped never go through unmap(),
     // so the foreign toplevel handles must be destroyed here as well. Otherwise
     // they leak: foreign-toplevel clients (e.g. taskbars) are left holding a
@@ -451,6 +456,22 @@ pub fn destroy(window: *Window) void {
     server.wm.windows.remove(window.ref.key);
 
     util.gpa.destroy(window);
+}
+
+/// Set window.anim, keeping server.animating_window_count in sync on a
+/// null<->non-null transition so Output.advanceAnimations() can fast-path
+/// the common case where nothing is animating.
+pub fn setAnim(window: *Window, value: ?Animation) void {
+    const was_active = window.anim != null;
+    window.anim = value;
+    const now_active = value != null;
+    if (was_active != now_active) {
+        if (now_active) {
+            server.animating_window_count += 1;
+        } else {
+            server.animating_window_count -= 1;
+        }
+    }
 }
 
 pub fn setDimensionsHint(window: *Window, hint: DimensionsHint) void {
@@ -1173,7 +1194,7 @@ pub fn renderFinish(window: *Window) void {
         else
             unminimize_anim_ms;
         const easing = animationEasingFromProtocol(window.rendering_requested.animation_easing, .ease_out);
-        window.anim = Animation.armUnminimize(
+        window.setAnim(Animation.armUnminimize(
             window.box.x,
             window.box.y,
             minimize_dy,
@@ -1183,7 +1204,7 @@ pub fn renderFinish(window: *Window) void {
             1.0,
             dur,
             easing,
-        );
+        ));
         // Start at the offset position (y + minimize_dy); the driver samples
         // toward y. Use the same constant as the animation so they cannot drift.
         const dy_off: i32 = @intFromFloat(minimize_dy);
@@ -1207,11 +1228,12 @@ pub fn renderFinish(window: *Window) void {
                 open_anim_ms;
             const easing = animationEasingFromProtocol(window.rendering_requested.animation_easing, .ease_out);
             // armSlide(x, y, dx) goes x -> x+dx; we want start_x -> box.x, i.e. +dx.
-            window.anim = Animation.armSlide(start_x, window.box.y, dx, dur, easing);
+            var anim = Animation.armSlide(start_x, window.box.y, dx, dur, easing);
             // Mark it as the entrance slide so a resize/move arriving mid-glide
             // (client commits its real buffer) does not clobber it (see the move
             // branch guard below).
-            window.anim.?.is_entrance_slide = true;
+            anim.is_entrance_slide = true;
+            window.setAnim(anim);
             window.tree.node.setPosition(start_x, window.box.y);
             window.popup_tree.node.setPosition(start_x, window.box.y);
         } else {
@@ -1221,7 +1243,7 @@ pub fn renderFinish(window: *Window) void {
             window.tree.node.setPosition(window.box.x, window.box.y);
             window.popup_tree.node.setPosition(window.box.x, window.box.y);
             Animation.applyOpacity(&window.surfaces.tree.node, 0.0);
-            window.anim = Animation.armFade(.open, window.box.x, window.box.y, 0.0, 1.0, open_scale, 1.0, open_anim_ms, .ease_out);
+            window.setAnim(Animation.armFade(.open, window.box.x, window.box.y, 0.0, 1.0, open_scale, 1.0, open_anim_ms, .ease_out));
         }
         Animation.scheduleAllOutputFrames();
         // one-shot consumed: clear all three so a stale intent/duration/easing
@@ -1254,22 +1276,23 @@ pub fn renderFinish(window: *Window) void {
             // Deck-switch IN from the right + fade + traveling clip (no clip for right entering).
             const dx: f32 = @as(f32, @floatFromInt(window.box.width)) * deck_in_dx_frac;
             const dx_i: i32 = @intFromFloat(@round(dx));
-            window.anim = Animation.armDeckIn(window.box.x, window.box.y, dx, deck_in_anim_ms, .ease_out);
+            window.setAnim(Animation.armDeckIn(window.box.x, window.box.y, dx, deck_in_anim_ms, .ease_out));
             window.tree.node.setPosition(window.box.x + dx_i, window.box.y);
             window.popup_tree.node.setPosition(window.box.x + dx_i, window.box.y);
         } else if (open_intent == .deck_in_left) {
             // Deck-switch IN from the left - fade + traveling clip.
             const dx: f32 = -@as(f32, @floatFromInt(window.box.width)) * deck_in_dx_frac;
             const dx_i: i32 = @intFromFloat(@round(dx));
-            window.anim = Animation.armDeckIn(window.box.x, window.box.y, dx, deck_in_anim_ms, .ease_out);
+            window.setAnim(Animation.armDeckIn(window.box.x, window.box.y, dx, deck_in_anim_ms, .ease_out));
             window.tree.node.setPosition(window.box.x + dx_i, window.box.y);
             window.popup_tree.node.setPosition(window.box.x + dx_i, window.box.y);
         } else {
             // slide_in: group-open entrance. -45% solid slide, no clip.
             const dx: f32 = @as(f32, @floatFromInt(window.box.width)) * slide_in_frac;
             const start_x: i32 = window.box.x - @as(i32, @intFromFloat(@round(dx)));
-            window.anim = Animation.armSlide(start_x, window.box.y, dx, dur, easing);
-            window.anim.?.is_entrance_slide = true;
+            var anim = Animation.armSlide(start_x, window.box.y, dx, dur, easing);
+            anim.is_entrance_slide = true;
+            window.setAnim(anim);
             window.tree.node.setPosition(start_x, window.box.y);
             window.popup_tree.node.setPosition(start_x, window.box.y);
         }
@@ -1329,7 +1352,7 @@ pub fn renderFinish(window: *Window) void {
             window.rendering_requested.animation_easing,
             if (clip_reveal) .ease_out else .spring,
         );
-        window.anim = Animation.armMove(
+        var anim = Animation.armMove(
             window.anim,
             old_x,
             old_y,
@@ -1340,13 +1363,14 @@ pub fn renderFinish(window: *Window) void {
             dur,
             ease,
         );
-        window.anim.?.clip_reveal = clip_reveal;
+        anim.clip_reveal = clip_reveal;
         if (preserve) {
-            window.anim.?.preserve_scale_xy = true;
+            anim.preserve_scale_xy = true;
         }
         if (clip_reveal) {
-            window.anim.?.delay_ns = @as(i64, grow_reveal_delay_ms) * std.time.ns_per_ms;
+            anim.delay_ns = @as(i64, grow_reveal_delay_ms) * std.time.ns_per_ms;
         }
+        window.setAnim(anim);
         // Leave the node at the start position; the frame loop advances it.
         window.tree.node.setPosition(old_x, old_y);
         window.popup_tree.node.setPosition(old_x, old_y);
@@ -1361,7 +1385,7 @@ pub fn renderFinish(window: *Window) void {
         // lateral nudge on the window that just gained focus. Direction: toward
         // the window's own side — deck (x>0) bumps right, main bumps left.
         const dir: f32 = if (window.box.x > 0) nudge_px else -nudge_px;
-        window.anim = Animation.armNudge(window.box.x, window.box.y, dir, nudge_anim_ms);
+        window.setAnim(Animation.armNudge(window.box.x, window.box.y, dir, nudge_anim_ms));
         window.tree.node.setPosition(window.box.x, window.box.y);
         window.popup_tree.node.setPosition(window.box.x, window.box.y);
         Animation.scheduleAllOutputFrames();

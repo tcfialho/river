@@ -477,9 +477,8 @@ fn handleFrame(listener: *wl.Listener(*wlr.Output), wlr_output: *wlr.Output) voi
     // Drive re-scheduling off our own active flag, independent of needsFrame().
     const now_ns = @as(i64, now.sec) * std.time.ns_per_s + @as(i64, now.nsec);
     // Window position/open animations and orphan close animations share the loop.
-    const windows_active = advanceAnimations(now_ns);
-    const orphans_active = Animation.advanceOrphans(now_ns);
-    const anim_active = windows_active or orphans_active;
+    // Coalesced across outputs firing the same vblank instant, see below.
+    const anim_active = advanceAnimationsOnce(now_ns);
 
     // TODO this should probably be retried on failure
     // While animating, force a commit even if the scene reports no damage: a
@@ -627,12 +626,35 @@ fn renderAndCommit(output: *Output, force: bool) !void {
     }
 }
 
+/// Coalesce the window/orphan animation tick across outputs that fire `frame`
+/// within the same vblank instant: with N outputs, N listeners each call this
+/// once per frame, but a `now_ns` that lands within `tick_epsilon_ns` of the
+/// last real computation reuses that result instead of re-walking every
+/// window/orphan for an effectively identical sample. Guarded on `diff >= 0`
+/// so a monotonic-clock anomaly (backwards jump) falls through to a real
+/// recompute rather than trusting a diff that looks small only because it's
+/// negative.
+const tick_epsilon_ns: i64 = std.time.ns_per_ms;
+
+fn advanceAnimationsOnce(now_ns: i64) bool {
+    const diff = now_ns - server.last_animation_tick_ns;
+    if (diff >= 0 and diff < tick_epsilon_ns) {
+        return server.last_animation_tick_active;
+    }
+    const windows_active = advanceAnimations(now_ns);
+    const orphans_active = Animation.advanceOrphans(now_ns);
+    const active = windows_active or orphans_active;
+    server.last_animation_tick_ns = now_ns;
+    server.last_animation_tick_active = active;
+    return active;
+}
+
 /// Advance every in-flight window animation to time `now_ns` and apply the
 /// interpolated position/opacity to the scene nodes. Finished animations are
 /// snapped to their target and cleared. Returns true if any animation is still
-/// active (the caller should schedule another frame). Time-based, so calling it
-/// from several outputs in the same vblank just recomputes the same sample.
+/// active (the caller should schedule another frame).
 pub fn advanceAnimations(now_ns: i64) bool {
+    if (server.animating_window_count == 0) return false;
     var any_active = false;
     var it = server.wm.windows.iterator();
     while (it.next()) |window| {
@@ -704,7 +726,7 @@ pub fn advanceAnimations(now_ns: i64) bool {
         }
 
         if (finished) {
-            window.anim = null;
+            window.setAnim(null);
         } else {
             any_active = true;
         }
