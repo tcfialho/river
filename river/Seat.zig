@@ -240,6 +240,11 @@ drag: enum {
     touch,
 } = .none,
 
+/// Timestamp (ms) of the last time idle_notifier.notifyActivity() was
+/// actually called. Lets handleActivity() collapse bursts of pointer/
+/// keyboard events into one notification per activity_throttle_ms window.
+last_activity_ms: u32 = 0,
+
 request_set_selection: wl.Listener(*wlr.Seat.event.RequestSetSelection) = .init(handleRequestSetSelection),
 request_start_drag: wl.Listener(*wlr.Seat.event.RequestStartDrag) = .init(handleRequestStartDrag),
 start_drag: wl.Listener(*wlr.Drag) = .init(handleStartDrag),
@@ -781,7 +786,15 @@ fn keyboardNotifyEnter(seat: *Seat, wlr_surface: *wlr.Surface) void {
     }
 }
 
-pub fn handleActivity(seat: Seat) void {
+// Idle-timeout/idle-inhibit granularity is seconds-to-minutes, so collapsing
+// bursts of activity (pointer motion can fire far faster than this) into one
+// notifyActivity() call per window is invisible to any real idle policy.
+const activity_throttle_ms: u32 = 100;
+
+pub fn handleActivity(seat: *Seat) void {
+    const now_ms = util.msecTimestamp();
+    if (now_ms -% seat.last_activity_ms < activity_throttle_ms) return;
+    seat.last_activity_ms = now_ms;
     server.input_manager.idle_notifier.notifyActivity(seat.wlr_seat);
 }
 
