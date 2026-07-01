@@ -810,8 +810,11 @@ pub fn updateState(cursor: *Cursor) void {
 
     switch (cursor.mode) {
         .passthrough, .drag => {
-            cursor.updateHovered();
-            cursor.passthrough(util.msecTimestamp());
+            // Single hit-test shared between both calls, mirroring
+            // processMotionRelative()'s existing pattern above.
+            const result = server.scene.at(cursor.wlr_cursor.x, cursor.wlr_cursor.y);
+            cursor.updateHoveredAt(result);
+            cursor.passthroughAt(result, util.msecTimestamp());
         },
         .ignore, .down, .op => {},
     }
