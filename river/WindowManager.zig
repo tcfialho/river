@@ -540,6 +540,12 @@ fn renderFinish(wm: *WindowManager) void {
     // every API call, resulting in redundant events being sent to clients.
     //
     // TODO(wlroots) provide a way to batch changes to the scene graph.
+    // Fold the FNV-1a fingerprint pass and the unconditional per-node
+    // renderFinish() into a single walk of wm.rendering_requested.list. The
+    // reparent/raiseToTop pass below still needs the *complete* hash to know
+    // whether the order changed, so it stays a separate walk — but it's now
+    // skipped entirely in the common case (reorder == false) instead of
+    // walking the whole list a second time just to no-op on every node.
     const new_order_hash = blk: {
         // The render order only needs a cheap, non-cryptographic fingerprint to
         // detect reordering between commits — Blake3 is overkill here. FNV-1a
@@ -553,26 +559,26 @@ fn renderFinish(wm: *WindowManager) void {
                 .window => |window| {
                     hash_val = (hash_val ^ @as(u64, @bitCast(window.ref))) *% prime;
                     hash_val = (hash_val ^ @as(u64, @intFromBool(renderedFullscreen(window)))) *% prime;
+                    window.renderFinish();
                 },
                 .shell_surface => |shell_surface| {
                     hash_val = (hash_val ^ @intFromPtr(shell_surface)) *% prime;
+                    shell_surface.renderFinish();
                 },
             }
         }
         break :blk hash_val;
     };
 
-    {
-        const reorder = wm.rendering_requested.order_hash != new_order_hash;
-        wm.rendering_requested.order_hash = new_order_hash;
+    const reorder = wm.rendering_requested.order_hash != new_order_hash;
+    wm.rendering_requested.order_hash = new_order_hash;
 
+    if (reorder) {
         var found_fullscreen: bool = false;
         var it = wm.rendering_requested.list.iterator(.forward);
         while (it.next()) |node| {
             switch (node.get()) {
                 .window => |window| {
-                    window.renderFinish();
-                    if (!reorder) continue;
                     window.popup_tree.node.reparent(server.scene.layers.popups);
                     if (renderedFullscreen(window)) {
                         window.tree.node.reparent(server.scene.layers.fullscreen);
@@ -584,8 +590,6 @@ fn renderFinish(wm: *WindowManager) void {
                     }
                 },
                 .shell_surface => |shell_surface| {
-                    shell_surface.renderFinish();
-                    if (!reorder) continue;
                     shell_surface.popup_tree.node.reparent(server.scene.layers.popups);
                     if (found_fullscreen) {
                         shell_surface.tree.node.reparent(server.scene.layers.fullscreen);
