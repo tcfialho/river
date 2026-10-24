@@ -1164,17 +1164,6 @@ pub fn renderFinish(window: *Window) void {
         window.fullscreen_background.node.setEnabled(false);
         window.drawBorders();
     }
-    // Current keyboard-focus state, for the focus-gained nudge.
-    const now_focused = blk: {
-        var it = server.wm.sent.seats.iterator(.forward);
-        while (it.next()) |seat| {
-            if (seat.focused == .window and seat.focused.window == window) break :blk true;
-        }
-        break :blk false;
-    };
-    const focus_gained = enabled and now_focused and !window.anim_focused;
-    window.anim_focused = now_focused;
-
     // Decide how to apply the new position: open-fade, move-tween, or snap.
     const first_show = enabled and !window.anim_positioned and window.wm_requested.fullscreen == null;
     const moved = old_x != window.box.x or old_y != window.box.y;
@@ -1380,10 +1369,11 @@ pub fn renderFinish(window: *Window) void {
         window.rendering_requested.animation_intent = 0;
         window.rendering_requested.animation_duration_ms = 0;
         window.rendering_requested.animation_easing = 0;
-    } else if (focus_gained and window.anim == null and can_move_anim) {
-        // Pure focus change (no geometry change, nothing else animating): a brief
-        // lateral nudge on the window that just gained focus. Direction: toward
-        // the window's own side — deck (x>0) bumps right, main bumps left.
+    } else if (open_intent == .nudge and window.anim == null and can_move_anim) {
+        // WM-requested focus nudge (no geometry change, nothing else animating).
+        // Only the WM decides when focus deserves an animation: a focus gained by
+        // closing a menu/layer surface or by a click must not nudge. Direction:
+        // toward the window's own side — deck (x>0) bumps right, main bumps left.
         const dir: f32 = if (window.box.x > 0) nudge_px else -nudge_px;
         window.setAnim(Animation.armNudge(window.box.x, window.box.y, dir, nudge_anim_ms));
         window.tree.node.setPosition(window.box.x, window.box.y);
@@ -1398,6 +1388,13 @@ pub fn renderFinish(window: *Window) void {
     } else {
         window.tree.node.setPosition(window.box.x, window.box.y);
         window.popup_tree.node.setPosition(window.box.x, window.box.y);
+    }
+    // A nudge is one-shot: if no branch consumed it (window busy animating,
+    // hidden, fullscreen), drop it so it can never fire on a later render.
+    if (open_intent == .nudge) {
+        window.rendering_requested.animation_intent = 0;
+        window.rendering_requested.animation_duration_ms = 0;
+        window.rendering_requested.animation_easing = 0;
     }
     if (enabled) window.anim_positioned = true;
 
