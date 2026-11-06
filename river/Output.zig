@@ -26,6 +26,8 @@ const Window = @import("Window.zig");
 
 const log = std.log.scoped(.output);
 
+extern fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+
 pub const State = struct {
     state: enum {
         /// Powered on and exposed to the window manager
@@ -197,6 +199,18 @@ zero_copy_log_suppressed: u16 = 0,
 tearing_test_succeeded: bool = false,
 last_direct_scanout: bool = false,
 tearing_test_frame_counter: u8 = 0,
+/// Set when the driver rejects a real tearing page-flip that passed the test
+/// commit (e.g. nvidia-drm advertises DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP but its
+/// planes reject any FB_ID change in an async atomic commit). The test is a
+/// false positive by construction — it reuses the current buffer, so no
+/// property actually changes. Once set, tearing is never attempted again on
+/// this output.
+tearing_broken: bool = false,
+
+frame_timer: *wl.EventSource,
+frame_timer_armed: bool = false,
+last_present_ns: i64 = 0,
+present_refresh_ns: i64 = 0,
 
 destroy: wl.Listener(*wlr.Output) = .init(handleDestroy),
 request_state: wl.Listener(*wlr.Output.event.RequestState) = .init(handleRequestState),
@@ -221,6 +235,11 @@ pub fn create(wlr_output: *wlr.Output) !void {
     if (!wlr_output.initRender(server.allocator, server.renderer)) return error.InitRenderFailed;
 
     const scene_output = try server.scene.wlr_scene.createSceneOutput(wlr_output);
+
+    const event_loop = server.wl_server.getEventLoop();
+    const timer = try event_loop.addTimer(*Output, handleFrameTimer, output);
+    errdefer timer.remove();
+
     errdefer comptime unreachable;
 
     const initial: State = .{
@@ -242,6 +261,7 @@ pub fn create(wlr_output: *wlr.Output) !void {
         .current = initial,
         .link = undefined,
         .link_sent = undefined,
+        .frame_timer = timer,
     };
     wlr_output.data = output;
 
@@ -291,6 +311,8 @@ fn handleDestroy(listener: *wl.Listener(*wlr.Output), wlr_output: *wlr.Output) v
     output.request_state.link.remove();
     output.frame.link.remove();
     output.present.link.remove();
+    output.frame_timer.remove();
+    output.frame_timer_armed = false;
 
     wlr_output.data = null;
 
@@ -467,9 +489,8 @@ fn handleRequestState(listener: *wl.Listener(*wlr.Output.event.RequestState), ev
     server.wm.dirtyWindowing();
 }
 
-fn handleFrame(listener: *wl.Listener(*wlr.Output), wlr_output: *wlr.Output) void {
-    const output: *Output = @fieldParentPtr("frame", listener);
-
+fn renderNow(output: *Output) void {
+    const wlr_output = output.wlr_output orelse return;
     var now = util.timestamp();
 
     // Advance MainDeck animations before rendering, so the scene-node mutations
@@ -497,6 +518,53 @@ fn handleFrame(listener: *wl.Listener(*wlr.Output), wlr_output: *wlr.Output) voi
     if (anim_active) wlr_output.scheduleFrame();
 }
 
+fn handleFrame(listener: *wl.Listener(*wlr.Output), wlr_output: *wlr.Output) void {
+    _ = wlr_output;
+    const output: *Output = @fieldParentPtr("frame", listener);
+    const delay_ns = renderDelayNs(output);
+    if (delay_ns == 0) {
+        output.renderNow();
+        return;
+    }
+    if (output.frame_timer_armed) return;
+    const now = Animation.nowNs();
+    var target = output.last_present_ns + output.present_refresh_ns;
+    if (output.present_refresh_ns > 0) {
+        while (target <= now) target += output.present_refresh_ns;
+    }
+    const deadline = target - delay_ns;
+    const wait_ms = @divTrunc(deadline - now, std.time.ns_per_ms);
+    if (wait_ms < 1) {
+        output.renderNow();
+        return;
+    }
+    output.frame_timer.timerUpdate(@intCast(wait_ms)) catch {
+        output.renderNow();
+        return;
+    };
+    output.frame_timer_armed = true;
+}
+
+fn handleFrameTimer(output: *Output) c_int {
+    output.frame_timer_armed = false;
+    output.renderNow();
+    return 0;
+}
+
+fn renderDelayNs(output: *Output) i64 {
+    if (output.present_refresh_ns == 0) return 0;
+    if (output.rendering_current.tearing) return 0;
+    if (output.current.adaptive_sync) return 0;
+
+    const delay_env = getenv("RIVER_RENDER_DELAY_MS") orelse return 0;
+    const delay_str = std.mem.span(delay_env);
+    if (delay_str.len == 0) return 0;
+    const delay_ms = std.fmt.parseInt(i64, delay_str, 10) catch return 0;
+    if (delay_ms <= 0) return 0;
+
+    return delay_ms * std.time.ns_per_ms;
+}
+
 fn renderAndCommit(output: *Output, force: bool) !void {
     if (!force and !output.scene_output.?.needsFrame()) return;
 
@@ -510,7 +578,7 @@ fn renderAndCommit(output: *Output, force: bool) !void {
 
     if (!scene_output.buildState(&state, null)) return error.CommitFailed;
 
-    if (output.rendering_current.tearing) {
+    if (output.rendering_current.tearing and !output.tearing_broken) {
         // Don't run the tearing page-flip test on every frame. The hardware test
         // (testState with tearing_page_flip) is not free, and on outputs where
         // tearing is not currently possible — e.g. direct scanout is not active —
@@ -564,17 +632,18 @@ fn renderAndCommit(output: *Output, force: bool) !void {
     const direct_scanout_allowed = wlr_output.isDirectScanoutAllowed();
     const committed_buffer = state.committed.buffer and state.buffer != null;
     if (!wlr_output.commitState(&state)) {
-        // A commit that we attempted with tearing_page_flip and that failed is
-        // evidence the tearing path is not currently viable: feed it back into
-        // the backoff (drop the cached success and count it as a failure, arming
-        // the cooldown if we hit the limit) so we stop attempting it every frame.
+        // Drop the cached test success on any failed commit. If this was a
+        // tearing flip that the driver rejected (see note above on nvidia-drm),
+        // mark tearing broken so it is never attempted again on this output.
         output.tearing_test_succeeded = false;
         if (state.tearing_page_flip) {
-            output.tearing_test_failures +|= 1;
-            if (output.tearing_test_failures >= tearing_failure_limit) {
-                output.tearing_test_failures = 0;
-                output.tearing_test_cooldown = tearing_retry_cooldown_frames;
-            }
+            // The test commit passed but the real flip was rejected: the driver
+            // advertises async page-flip support yet refuses any buffer change
+            // (e.g. nvidia-drm: "No prop can be changed during async flip"). The
+            // test is a structural false positive, so stop attempting tearing on
+            // this output instead of burning frames in retry cycles.
+            output.tearing_broken = true;
+            log.info("tearing page-flip rejected by driver for {s}; disabling tearing on this output", .{wlr_output.name});
         }
         return error.CommitFailed;
     }
@@ -654,13 +723,20 @@ fn advanceAnimationsOnce(now_ns: i64) bool {
 /// snapped to their target and cleared. Returns true if any animation is still
 /// active (the caller should schedule another frame).
 pub fn advanceAnimations(now_ns: i64) bool {
-    if (server.animating_window_count == 0) return false;
+    if (server.animating_windows.empty()) return false;
     var any_active = false;
-    var it = server.wm.windows.iterator();
+    var it = server.animating_windows.safeIterator(.forward);
     while (it.next()) |window| {
         const anim = &(window.anim orelse continue);
         const finished = anim.done(now_ns);
         const s = anim.sample(now_ns);
+        // Only resolved when a branch below actually consumes it: pure
+        // move/fade animations (neither clip_reveal nor scale/resize) never
+        // touch a buffer, so skip the walk for that common case.
+        const sb: ?*wlr.SceneBuffer = if (anim.clip_reveal or anim.scales() or anim.resizes())
+            Animation.singleBuffer(&window.surfaces.tree.node)
+        else
+            null;
 
         // Base position: sampled while animating, snapped to the logical target
         // in window.box on finish.
@@ -680,12 +756,12 @@ pub fn advanceAnimations(now_ns: i64) bool {
             if (finished) {
                 Animation.clearClipReveal(window.surfaces.tree);
             } else {
-                Animation.applyClipReveal(window.surfaces.tree, s.fx, window.box.width, window.box.height);
+                Animation.applyClipRevealWith(sb, window.surfaces.tree, s.fx, window.box.width, window.box.height);
             }
         } else if (anim.scales() or anim.resizes()) {
             const fx: f32 = if (finished) anim.target_scale else s.scale * s.fx;
             const fy: f32 = if (finished) anim.target_scale else s.scale * s.fy;
-            const r = Animation.applyScaleXY(&window.surfaces.tree.node, fx, fy, window.box.width, window.box.height);
+            const r = Animation.applyScaleXYWith(sb, fx, fy, window.box.width, window.box.height);
             off_x = r.dx;
             off_y = r.dy;
             // Minimize/unminimize: scale origin at the BOTTOM center, not the
@@ -741,6 +817,10 @@ fn handlePresent(
     const output: *Output = @fieldParentPtr("present", listener);
     if (!event.presented) {
         return;
+    }
+    output.last_present_ns = @as(i64, event.when.sec) * std.time.ns_per_s + event.when.nsec;
+    if (event.refresh > 0) {
+        output.present_refresh_ns = event.refresh;
     }
     output.logZeroCopyTransition(event.output, event.flags.zero_copy);
     switch (output.lock_render_state) {

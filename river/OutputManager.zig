@@ -87,6 +87,7 @@ fn handleNewOutput(_: *wl.Listener(*wlr.Output), wlr_output: *wlr.Output) void {
         switch (err) {
             error.OutOfMemory => log.err("out of memory", .{}),
             error.InitRenderFailed => log.err("failed to initialize renderer for output {s}", .{wlr_output.name}),
+            error.AddTimerFailed => log.err("failed to create frame timer for output {s}", .{wlr_output.name}),
         }
         wlr_output.destroy();
         return;

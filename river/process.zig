@@ -42,6 +42,31 @@ pub fn setup() void {
     } else |_| {
         std.log.err("getrlimit failed, using system default file descriptor limit ", .{});
     }
+
+    setupScheduling();
+}
+
+const SCHED_RR: c_int = 2;
+const SCHED_OTHER: c_int = 0;
+const PRIO_PROCESS: c_int = 0;
+const sched_param = extern struct { sched_priority: c_int };
+extern fn sched_setscheduler(pid: posix.pid_t, policy: c_int, param: *const sched_param) c_int;
+extern fn setpriority(which: c_int, who: c_uint, prio: c_int) c_int;
+
+fn setupScheduling() void {
+    const rt_param: sched_param = .{ .sched_priority = 1 };
+    if (sched_setscheduler(0, SCHED_RR, &rt_param) == 0) {
+        std.log.info("running with SCHED_RR priority 1", .{});
+        return;
+    }
+    // Fallback: negative nice. Also needs privilege (limits.conf nice cap),
+    // so this may fail too — river then just runs at default priority.
+    if (setpriority(PRIO_PROCESS, 0, -10) == 0) {
+        std.log.info("running with nice -10", .{});
+    } else {
+        std.log.info("no scheduling privilege, running at default priority " ++
+            "(grant rtprio via /etc/security/limits.conf, see PERF-AUDIT)", .{});
+    }
 }
 
 pub fn cleanupChild() void {
@@ -54,6 +79,11 @@ pub fn cleanupChild() void {
         .flags = 0,
     };
     posix.sigaction(posix.SIG.PIPE, &sig_dfl, null);
+
+    // Children must not inherit river's RT scheduling.
+    const other_param: sched_param = .{ .sched_priority = 0 };
+    _ = sched_setscheduler(0, SCHED_OTHER, &other_param);
+    _ = setpriority(PRIO_PROCESS, 0, 0);
 
     if (original_rlimit) |original| {
         posix.setrlimit(.NOFILE, original) catch {

@@ -64,6 +64,10 @@ config: Keyboard.Config,
 /// setting keyboard focus.
 state: wlr.Keyboard,
 modifiers_old: wlr.Keyboard.ModifierMask = .{},
+/// Cached from group.config.keymap, kept in sync by updateModMasks().
+/// Avoids two xkbcommon C calls (modGetMask) on every sendState().
+caps_mask: xkb.ModMask = 0,
+num_mask: xkb.ModMask = 0,
 
 /// Maps from pressed libinput keycode (not xkb keycode) to information
 /// about where the press event has been sent.
@@ -96,6 +100,7 @@ pub fn create(seat: *Seat, config: Keyboard.Config, virtual: bool) !*KeyboardGro
 
     // wlroots will log an error on failure, there's not much we can do to recover unfortunately.
     _ = group.state.setKeymap(config.keymap);
+    group.updateModMasks();
     group.state.setRepeatInfo(config.repeat_rate, config.repeat_delay);
 
     group.state.events.key.add(&group.key);
@@ -423,16 +428,27 @@ fn getInputMethodGrab(group: *KeyboardGroup) ?*wlr.InputMethodV2.KeyboardGrab {
 pub fn processKeymap(group: *KeyboardGroup, keymap: *xkb.Keymap) void {
     // wlroots will log an error on failure, there's not much we can do to recover unfortunately.
     _ = group.state.setKeymap(keymap);
+    group.updateModMasks();
+}
+
+/// Cache caps/num lock masks from group.config.keymap (the same keymap
+/// sendState() reads — not necessarily the one just passed to state.setKeymap()
+/// by processKeymap() for virtual keyboards, matching pre-existing behavior).
+/// Avoids two xkbcommon C calls (modGetMask) on every sendState() invocation.
+fn updateModMasks(group: *KeyboardGroup) void {
+    const keymap = group.config.keymap orelse return;
+    group.caps_mask = keymap.modGetMask(xkb.names.mod.caps);
+    group.num_mask = keymap.modGetMask(xkb.names.vmod.num);
 }
 
 pub fn sendState(group: *KeyboardGroup) void {
+    if (server.xkb_config.keyboards.empty()) return;
+
     const keymap = group.config.keymap.?;
     const layout_index = group.state.modifiers.group;
     const layout_name = keymap.layoutGetName(layout_index);
-    const caps_mask = keymap.modGetMask(xkb.names.mod.caps);
-    const capslock = group.state.modifiers.locked & caps_mask != 0;
-    const num_mask = keymap.modGetMask(xkb.names.vmod.num);
-    const numlock = group.state.modifiers.locked & num_mask != 0;
+    const capslock = group.state.modifiers.locked & group.caps_mask != 0;
+    const numlock = group.state.modifiers.locked & group.num_mask != 0;
 
     var it = server.xkb_config.keyboards.iterator(.forward);
     while (it.next()) |xkb_keyboard| {
