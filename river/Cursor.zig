@@ -485,7 +485,12 @@ fn updateHoveredAt(cursor: *Cursor, maybe_result: ?Scene.AtResult) void {
     }
 
     if (cursor.seat.wm_scheduled.hovered != old) {
-        server.wm.dirtyWindowing();
+        // Hover changes are informational for the WM (focus-follows-mouse at
+        // most): coalesce them (8ms) instead of stalling input processing on
+        // an immediate manage round-trip. A subsequent click still forces an
+        // immediate sequence via interact() -> dirtyWindowing(), and that
+        // sequence carries both the hover and the interaction.
+        server.wm.dirtyWindowingLazy();
         cursor.last_notified = null;
     }
 }
@@ -628,6 +633,13 @@ pub fn processAxis(cursor: *Cursor, event: *const Seat.Event.PointerAxis) void {
 fn interact(cursor: Cursor, result: Scene.AtResult) void {
     switch (result.data) {
         .window => |window| {
+            // Authorize X11 focus handoff before forwarding the click: menus
+            // may request focus before the asynchronous WM reply arrives.
+            if (build_options.xwayland and window.impl == .xwayland and
+                (cursor.seat.focused != .window or cursor.seat.focused.window != window))
+            {
+                wlr_xwayland_surface_offer_focus(window.impl.xwayland.xsurface);
+            }
             cursor.seat.wm_scheduled.interaction = .{ .window = window.ref };
             server.wm.dirtyWindowing();
         },
@@ -987,3 +999,5 @@ fn queueHoldEnd(listener: *wl.Listener(*wlr.Pointer.event.HoldEnd), event: *wlr.
         .cancelled = event.cancelled,
     } }) catch {};
 }
+
+extern fn wlr_xwayland_surface_offer_focus(surface: *wlr.XwaylandSurface) void;

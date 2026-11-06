@@ -349,13 +349,78 @@ pub fn destroy(seat: *Seat) void {
     util.gpa.destroy(seat);
 }
 
+fn tryCoalesce(seat: *Seat, event: *const Event) bool {
+    const queue = &seat.event_queue;
+    switch (event.*) {
+        .pointer_frame => {
+            if (queue.backPtr()) |last| {
+                if (last.* == .pointer_frame) return true;
+            }
+            return false;
+        },
+        .pointer_motion_relative => |ev| {
+            if (queue.backPtr()) |last| {
+                if (last.* == .pointer_motion_relative and
+                    std.meta.eql(last.pointer_motion_relative.mapping, ev.mapping))
+                {
+                    const m = &last.pointer_motion_relative;
+                    m.delta_x += ev.delta_x;
+                    m.delta_y += ev.delta_y;
+                    m.unaccel_dx += ev.unaccel_dx;
+                    m.unaccel_dy += ev.unaccel_dy;
+                    m.time_msec = ev.time_msec;
+                    return true;
+                }
+                if (last.* == .pointer_frame and queue.len >= 2) {
+                    const prev = queue.atPtr(queue.len - 2);
+                    if (prev.* == .pointer_motion_relative and
+                        std.meta.eql(prev.pointer_motion_relative.mapping, ev.mapping))
+                    {
+                        const m = &prev.pointer_motion_relative;
+                        m.delta_x += ev.delta_x;
+                        m.delta_y += ev.delta_y;
+                        m.unaccel_dx += ev.unaccel_dx;
+                        m.unaccel_dy += ev.unaccel_dy;
+                        m.time_msec = ev.time_msec;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        },
+        .pointer_motion_absolute => |ev| {
+            if (queue.backPtr()) |last| {
+                if (last.* == .pointer_motion_absolute and
+                    std.meta.eql(last.pointer_motion_absolute.mapping, ev.mapping))
+                {
+                    last.pointer_motion_absolute = ev;
+                    return true;
+                }
+                if (last.* == .pointer_frame and queue.len >= 2) {
+                    const prev = queue.atPtr(queue.len - 2);
+                    if (prev.* == .pointer_motion_absolute and
+                        std.meta.eql(prev.pointer_motion_absolute.mapping, ev.mapping))
+                    {
+                        prev.pointer_motion_absolute = ev;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
 pub fn queueEvent(seat: *Seat, event: Event) !void {
     seat.handleActivity();
 
-    seat.event_queue.pushBackBounded(event) catch {
-        log.err("dropping {s} event, no space in event queue", .{@tagName(event)});
-        return error.QueueFull;
-    };
+    if (!seat.tryCoalesce(&event)) {
+        seat.event_queue.pushBackBounded(event) catch {
+            log.err("dropping {s} event, no space in event queue", .{@tagName(event)});
+            return error.QueueFull;
+        };
+    }
 
     if (server.wm.state == .idle) {
         seat.processEvents();
@@ -836,7 +901,7 @@ pub fn matchXkbBinding(
     // with xkbcommon for intuitive behavior. For example, layouts may require
     // translation with the numlock modifier to obtain keypad number keysyms
     // (e.g. KP_1).
-    {
+    if (found == null) {
         var it = seat.xkb_bindings.iterator(.forward);
         while (it.next()) |binding| {
             if (binding.match(keycode, modifiers, xkb_state, .translate)) {
