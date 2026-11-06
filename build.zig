@@ -145,7 +145,7 @@ pub fn build(b: *Build) !void {
     // exposed to the wlroots module for @cImport() to work. This seems to be
     // the best way to do so with the current std.Build API.
     wlroots.resolved_target = target;
-    const wlroots_pkgconf = "wlroots-0.20";
+    const wlroots_pkgconf = "wlroots-0.21";
     wlroots.linkSystemLibrary(wlroots_pkgconf, .{});
 
     const flags = b.createModule(.{ .root_source_file = b.path("common/flags.zig") });
