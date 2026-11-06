@@ -105,11 +105,7 @@ wm: WindowManager,
 /// after their Window was torn down). Empty in steady state. Initialized in
 /// init() and drained in deinit() via Animation.destroyAllOrphans().
 orphans: wl.list.Head(Animation.OrphanClose, .link),
-
-/// Count of windows with a non-null `.anim`, kept in sync by Window.setAnim().
-/// Lets Output.advanceAnimations() skip the full window scan in the common
-/// steady-state case where nothing is animating.
-animating_window_count: u32 = 0,
+animating_windows: wl.list.Head(Window, .anim_link),
 /// Timestamp (ns) and result of the last window/orphan animation tick actually
 /// computed. When several outputs fire `frame` for the same vblank instant,
 /// later ones reuse this instead of re-walking windows/orphans for an
@@ -207,6 +203,7 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
         .lock_manager = undefined,
         .wm = undefined,
         .orphans = undefined,
+        .animating_windows = undefined,
         .xkb_bindings = undefined,
         .layer_shell = undefined,
     };
@@ -245,6 +242,7 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
 
     try server.wm.init();
     server.orphans.init();
+    server.animating_windows.init();
     try server.xkb_bindings.init();
     try server.layer_shell.init();
     try server.scene.init();

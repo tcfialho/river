@@ -634,7 +634,7 @@ fn countBufferIter(buffer: *wlr.SceneBuffer, _: c_int, _: c_int, ctx: *CountCtx)
 }
 
 /// Number of surface buffers under `node`, and the sole buffer if exactly one.
-fn singleBuffer(node: *wlr.SceneNode) ?*wlr.SceneBuffer {
+pub fn singleBuffer(node: *wlr.SceneNode) ?*wlr.SceneBuffer {
     var ctx: CountCtx = .{};
     node.forEachBuffer(*CountCtx, countBufferIter, &ctx);
     return if (ctx.count == 1) ctx.last else null;
@@ -654,13 +654,13 @@ pub const ScaleResult = struct {
 /// always full. `frac` in (0,1]. The content is NOT scaled — it stays at its
 /// committed size, so there is no distortion. Pass frac >= 1.0 (or call
 /// clearClipReveal) to remove the clip. No-op if not a single-buffer surface.
-pub fn applyClipReveal(tree: *wlr.SceneTree, frac: f32, full_w: i32, full_h: i32) void {
+pub fn applyClipRevealWith(buffer: ?*wlr.SceneBuffer, tree: *wlr.SceneTree, frac: f32, full_w: i32, full_h: i32) void {
     var revealed: i32 = @intFromFloat(@round(@as(f32, @floatFromInt(full_w)) * frac));
     // Clamp to the buffer the client has actually committed: revealing past it
     // would expose an empty region (the "stripes on the right").
-    if (singleBuffer(&tree.node)) |buffer| {
-        if (buffer.buffer) |buf| {
-            if (revealed > buf.width) revealed = buf.width;
+    if (buffer) |buf| {
+        if (buf.buffer) |b| {
+            if (revealed > b.width) revealed = b.width;
         }
     }
     if (revealed < 1) revealed = 1;
@@ -668,6 +668,10 @@ pub fn applyClipReveal(tree: *wlr.SceneTree, frac: f32, full_w: i32, full_h: i32
     if (!tree.children.empty()) {
         tree.node.subsurfaceTreeSetClip(&clip);
     }
+}
+
+pub fn applyClipReveal(tree: *wlr.SceneTree, frac: f32, full_w: i32, full_h: i32) void {
+    applyClipRevealWith(singleBuffer(&tree.node), tree, frac, full_w, full_h);
 }
 
 /// Remove any clip applied by applyClipReveal (restore the full surface).
@@ -683,7 +687,7 @@ pub fn clearClipReveal(tree: *wlr.SceneTree) void {
 /// pop (fx == fy) and the non-uniform size tween (fx != fy). Returns the
 /// recentering offset for the window tree node. No-op (applied=false) for
 /// multi-buffer windows or fx == fy == 1.0.
-pub fn applyScaleXY(node: *wlr.SceneNode, fx: f32, fy: f32, nat_w: i32, nat_h: i32) ScaleResult {
+pub fn applyScaleXYWith(buffer: ?*wlr.SceneBuffer, fx: f32, fy: f32, nat_w: i32, nat_h: i32) ScaleResult {
     if (fx == 1.0 and fy == 1.0) {
         // Restore AUTO sizing, not a fixed size. A scene_surface only re-tracks
         // the client's committed buffer size while dst is (0,0) — see wlroots
@@ -694,21 +698,29 @@ pub fn applyScaleXY(node: *wlr.SceneNode, fx: f32, fy: f32, nat_w: i32, nat_h: i
         // (the "stripes on the right") until a later render re-finishes. Passing
         // (0,0) re-enables auto-tracking so the new buffer is reflected the instant
         // it lands, no focus change needed. nat_w/nat_h are unused in this branch.
-        if (singleBuffer(node)) |buffer| buffer.setDestSize(0, 0);
+        if (buffer) |buf| buf.setDestSize(0, 0);
         return .{ .dx = 0, .dy = 0, .applied = false };
     }
-    const buffer = singleBuffer(node) orelse return .{ .dx = 0, .dy = 0, .applied = false };
+    const buf = buffer orelse return .{ .dx = 0, .dy = 0, .applied = false };
     const fw: f32 = @as(f32, @floatFromInt(nat_w)) * fx;
     const fh: f32 = @as(f32, @floatFromInt(nat_h)) * fy;
-    buffer.setDestSize(@intFromFloat(@round(fw)), @intFromFloat(@round(fh)));
+    buf.setDestSize(@intFromFloat(@round(fw)), @intFromFloat(@round(fh)));
     const dx: f32 = (1.0 - fx) * @as(f32, @floatFromInt(nat_w)) / 2.0;
     const dy: f32 = (1.0 - fy) * @as(f32, @floatFromInt(nat_h)) / 2.0;
     return .{ .dx = @intFromFloat(@round(dx)), .dy = @intFromFloat(@round(dy)), .applied = true };
 }
 
+pub fn applyScaleXY(node: *wlr.SceneNode, fx: f32, fy: f32, nat_w: i32, nat_h: i32) ScaleResult {
+    return applyScaleXYWith(singleBuffer(node), fx, fy, nat_w, nat_h);
+}
+
+pub fn applyScaleWith(buffer: ?*wlr.SceneBuffer, f: f32, nat_w: i32, nat_h: i32) ScaleResult {
+    return applyScaleXYWith(buffer, f, f, nat_w, nat_h);
+}
+
 /// Uniform convenience wrapper (pop): same factor on both axes.
 pub fn applyScale(node: *wlr.SceneNode, f: f32, nat_w: i32, nat_h: i32) ScaleResult {
-    return applyScaleXY(node, f, f, nat_w, nat_h);
+    return applyScaleWith(singleBuffer(node), f, nat_w, nat_h);
 }
 
 // ===========================================================================
@@ -739,6 +751,7 @@ pub const OrphanClose = struct {
     y: i32,
     nat_w: i32,
     nat_h: i32,
+    single_buffer: ?*wlr.SceneBuffer,
 
     fn destroy(orphan: *OrphanClose) void {
         orphan.link.remove();
@@ -751,6 +764,8 @@ pub const OrphanClose = struct {
 const CopyCtx = struct {
     dest: *wlr.SceneTree,
     ok: bool,
+    count: u32 = 0,
+    last: ?*wlr.SceneBuffer = null,
 };
 
 fn copyBufferIter(buffer: *wlr.SceneBuffer, sx: c_int, sy: c_int, ctx: *CopyCtx) void {
@@ -766,6 +781,9 @@ fn copyBufferIter(buffer: *wlr.SceneBuffer, sx: c_int, sy: c_int, ctx: *CopyCtx)
     sb.setDestSize(buffer.dst_width, buffer.dst_height);
     sb.setSourceBox(&buffer.src_box);
     sb.setTransform(buffer.transform);
+
+    ctx.count += 1;
+    ctx.last = sb;
 }
 
 /// How a closing window should leave: the P17 close matrix.
@@ -833,6 +851,7 @@ pub fn spawnClose(
         .y = y,
         .nat_w = nat_w,
         .nat_h = nat_h,
+        .single_buffer = if (ctx.count == 1) ctx.last else null,
     };
     server.orphans.append(orphan);
 
@@ -882,6 +901,7 @@ pub fn spawnDeckOut(
         .y = y,
         .nat_w = nat_w,
         .nat_h = nat_h,
+        .single_buffer = if (ctx.count == 1) ctx.last else null,
     };
     server.orphans.append(orphan);
 
@@ -930,6 +950,7 @@ pub fn spawnMinimize(
         .y = y,
         .nat_w = nat_w,
         .nat_h = nat_h,
+        .single_buffer = if (ctx.count == 1) ctx.last else null,
     };
     server.orphans.append(orphan);
 
@@ -961,7 +982,7 @@ pub fn advanceOrphans(now_ns: i64) bool {
         // For a slide, scale is 1.0 so applyScale is a no-op (r.dx = 0). The
         // sampled x/y carry the slide (start -> start+dx); the fade close keeps
         // s.x == orphan.x (armFade fixes target_x = x), so this also covers it.
-        const r = applyScale(&orphan.tree.node, s.scale, orphan.nat_w, orphan.nat_h);
+        const r = applyScaleWith(orphan.single_buffer, s.scale, orphan.nat_w, orphan.nat_h);
         var oy: i32 = r.dy;
         // Minimize orphan: scale origin at the BOTTOM center, not the center, so
         // the shrink goes toward the bottom edge (toward the taskbar). Override

@@ -337,6 +337,7 @@ box: wlr.Box = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
 /// MainDeck animation in flight, if any. `null` in steady state (zero idle cost).
 /// Advanced by the output frame loop (Output.handleFrame), armed in renderFinish.
 anim: ?Animation = null,
+anim_link: wl.list.Link,
 /// Set true once the first post-map renderFinish has positioned the window, so
 /// the very first layout does not animate the window flying in from the origin.
 anim_positioned: bool = false,
@@ -381,9 +382,12 @@ pub fn create(impl: Impl) error{OutOfMemory}!*Window {
         .decorations_above_tree = try tree.createSceneTree(),
         .popup_tree = popup_tree,
         .capture_scene = try wlr.Scene.create(),
+        .anim_link = undefined,
     };
 
     window.node.init(.window);
+
+    window.anim_link.init();
 
     window.decorations_below.init();
     window.decorations_above.init();
@@ -407,7 +411,7 @@ pub fn create(impl: Impl) error{OutOfMemory}!*Window {
 pub fn destroy(window: *Window) void {
     assert(window.impl == .destroying);
 
-    // Defensive: keep server.animating_window_count from leaking if a window
+    // Defensive: prevent the window from leaking in server.animating_windows if it
     // is ever destroyed while window.anim != null (belt-and-suspenders, not
     // known to be reachable given the .closing/.mapped asserts below).
     window.setAnim(null);
@@ -458,7 +462,7 @@ pub fn destroy(window: *Window) void {
     util.gpa.destroy(window);
 }
 
-/// Set window.anim, keeping server.animating_window_count in sync on a
+/// Set window.anim, keeping server.animating_windows in sync on a
 /// null<->non-null transition so Output.advanceAnimations() can fast-path
 /// the common case where nothing is animating.
 pub fn setAnim(window: *Window, value: ?Animation) void {
@@ -467,9 +471,10 @@ pub fn setAnim(window: *Window, value: ?Animation) void {
     const now_active = value != null;
     if (was_active != now_active) {
         if (now_active) {
-            server.animating_window_count += 1;
+            server.animating_windows.append(window);
         } else {
-            server.animating_window_count -= 1;
+            window.anim_link.remove();
+            window.anim_link.init();
         }
     }
 }
